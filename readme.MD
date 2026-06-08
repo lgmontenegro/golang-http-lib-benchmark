@@ -119,6 +119,20 @@ lado a lado no browser.
 Se o throughput ficar abaixo do rate alvo, o servidor está a saturar nessa
 taxa. Nesse caso, compara o ponto de saturação entre os três engines.
 
+## Resultado exemplo
+
+Corrida em macOS arm64 a 5000 req/s × 30s no endpoint `/health`:
+
+| Engine | Throughput | p50      | p95      | p99       | Success |
+|--------|------------|----------|----------|-----------|---------|
+| stdlib | 5000.03/s  | 39.7µs   | 71.4µs   | 134.1µs   | 100.00% |
+| gin    | 5000.02/s  | 39.4µs   | 66.9µs   | 124.7µs   | 100.00% |
+| fiber  | 5000.04/s  | 32.0µs   | 57.7µs   | 93.7µs    | 100.00% |
+
+A 5000 req/s nenhum engine satura — todos entregam 100%. Para diferenciar a
+sério, sobe a taxa (`./bench.sh 50000 30s` ou mais) até algum dos engines
+começar a perder throughput ou success ratio.
+
 ## Notas
 
 - O Fiber usa fasthttp por baixo, não net/http. O adapter faz `copy()` do body
@@ -126,6 +140,11 @@ taxa. Nesse caso, compara o ponto de saturação entre os três engines.
 - As rotas são declaradas no formato `:name` (convenção Gin/Fiber). O adapter
   da stdlib traduz para `{name}` antes de registar no `http.ServeMux`, já que
   o pattern routing do Go 1.22+ usa essa sintaxe.
+- O `bench.sh` parseia o formato compacto actual do vegeta — uma única linha
+  `Latencies [mean, 50, 95, 99, max]` em vez de linhas separadas por
+  percentil. Se usares uma versão antiga do vegeta que ainda produza
+  `50th`/`95th`/`99th` em linhas próprias, a tabela comparativa final virá
+  vazia (os ataques e os relatórios individuais continuam a funcionar).
 - O warmup antes de cada medição evita que o cold start do Go (GC, alocação
   inicial de goroutines) polua os resultados.
 - Para resultados consistentes, fecha aplicações que consumam CPU/rede e corre

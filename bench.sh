@@ -117,11 +117,14 @@ SUMMARY="$RESULTS_DIR/summary.txt"
     for engine in "${ENGINES[@]}"; do
         report="$RESULTS_DIR/${engine}.txt"
 
-        throughput=$(grep -i "^Throughput" "$report" | awk '{print $2}')
-        p50=$(grep -i "50th" "$report" | awk '{print $2}')
-        p95=$(grep -i "95th" "$report" | awk '{print $2}')
-        p99=$(grep -i "99th" "$report" | awk '{print $2}')
-        success=$(grep -i "^Success" "$report" | head -1 | awk '{print $3}')
+        # vegeta packs values into single lines:
+        #   Requests   [total, rate, throughput]  150000, 5000.04, 5000.03
+        #   Latencies  [mean, 50, 95, 99, max]    50µs, 40µs, 71µs, 134µs, 6ms
+        throughput=$(awk -F'[[:space:],]+' '/^Requests/ {print $NF}' "$report")
+        p50=$(awk -F'[[:space:],]+' '/^Latencies/ {print $8}' "$report")
+        p95=$(awk -F'[[:space:],]+' '/^Latencies/ {print $9}' "$report")
+        p99=$(awk -F'[[:space:],]+' '/^Latencies/ {print $10}' "$report")
+        success=$(awk '/^Success/ {print $3; exit}' "$report")
 
         printf "║  %-10s %12s %12s %12s %12s %10s\n" \
             "$engine" "$throughput" "$p50" "$p95" "$p99" "$success"
