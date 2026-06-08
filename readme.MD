@@ -7,6 +7,7 @@ carga constante com vegeta.
 ## Requisitos
 
 - Go 1.22+
+- Docker + Docker Compose (para o MySQL)
 - curl (para o healthcheck do script)
 - vegeta
 
@@ -18,14 +19,23 @@ go install github.com/tsenart/vegeta@latest
 
 ```
 go-http-di/
-├── main.go                      # Composition root com factory e handlers
-├── bench.sh                     # Script de benchmark comparativo
+├── main.go                       # Composition root (apenas wiring)
+├── bench.sh                      # Script de benchmark comparativo
+├── docker-compose.yml            # MySQL 8.0 com bind mount
+├── app/
+│   ├── app.go                    # Core: App struct + handlers
+│   └── transactions.go           # Driven port: Transaction + TransactionRepository + sentinel
 ├── server/
-│   ├── server.go                # Interface Server + tipos Request/Response
-│   ├── stdlib/stdlib.go         # Adapter net/http
-│   ├── ginadapt/gin.go          # Adapter Gin
-│   └── fiberadapt/fiber.go      # Adapter Fiber
-└── bench-results/               # Gerado após benchmark
+│   ├── server.go                 # Driving port: interface Server + tipos Request/Response
+│   ├── stdlib/stdlib.go          # Adapter net/http
+│   ├── ginadapt/gin.go           # Adapter Gin
+│   └── fiberadapt/fiber.go       # Adapter Fiber
+├── db/
+│   └── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
+├── mysql-init/
+│   └── 01-schema.sql             # DDL + seed; corre só no primeiro boot do MySQL
+├── mysql-data/                   # Volume bind do MySQL (gitignored)
+└── bench-results/                # Gerado após benchmark (gitignored)
     ├── stdlib.bin / .txt / .html
     ├── gin.bin / .txt / .html
     ├── fiber.bin / .txt / .html
@@ -40,10 +50,24 @@ go mod init example.com/httpdi
 go mod tidy
 ```
 
+## Subir o MySQL
+
+```bash
+docker compose up -d              # MySQL 8.0 em :3306, data em ./mysql-data
+docker compose logs -f mysql      # acompanhar primeiro boot (~10-20s)
+docker compose down               # parar (mantém dados)
+rm -rf mysql-data                 # wipe total + re-aplicar 01-schema.sql no próximo up
+```
+
+Credenciais default (alterar antes de qualquer uso sério): user `httpdi`,
+password `httpdipass`, database `httpdi`. O ficheiro `mysql-init/01-schema.sql`
+cria a tabela `transactions` e insere 10 linhas com IDs determinísticos
+`00000000-0000-0000-0000-000000000001` a `…010`.
+
 ## Executar o servidor manualmente
 
 ```bash
-# stdlib (default)
+# stdlib (default), conecta a MySQL no DSN default
 go run main.go
 
 # Gin
@@ -52,16 +76,39 @@ go run main.go -engine gin
 # Fiber
 go run main.go -engine fiber
 
-# Porta custom
-go run main.go -engine gin -addr :3000
+# Porta custom + DSN custom (também aceita env DB_DSN)
+go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-Testar:
+Testar (smoke):
 
 ```bash
 curl http://localhost:8080/health
 curl http://localhost:8080/hello/leonardo
+curl http://localhost:8080/v1/transaction/00000000-0000-0000-0000-000000000001
 ```
+
+## Executar a suite de testes
+
+```bash
+go test ./...                          # unitários + integração HTTP (~2.5s, sem MySQL)
+go test -race ./...                    # com detector de races
+go test -tags integration ./db/mysql   # integração MySQL (requer docker compose up)
+go test -v ./server/stdlib             # verbose, um pacote
+```
+
+Cobertura:
+
+- **Unitários** — `app` valida `Health`, `Hello` (incluindo o default `"world"`)
+  e `GetTransaction` (200/404/500 com `fakeTxRepo`); `server/stdlib` valida a
+  tradução de `:name` → `{name}`.
+- **Integração HTTP** — uma suite partilhada em `server/internal/servertest`
+  regista rotas, sobe cada adapter em portos dedicados (`:18081/2/3`), faz HTTP
+  real e verifica `/health`, `/hello/:name` e 404. Cada adapter tem um
+  `_test.go` mínimo que invoca a suite.
+- **Integração MySQL** — `db/mysql/mysql_test.go` está atrás da build tag
+  `integration` (precisa do container UP). Excluído de `go test ./...` por
+  default.
 
 ## Executar o benchmark
 
@@ -75,14 +122,17 @@ chmod +x bench.sh
 ./bench.sh 10000 60s
 ```
 
-O script executa sequencialmente para cada engine:
+O script:
 
-1. Compila o binário uma vez (`go build`)
-2. Inicia o servidor e aguarda o healthcheck responder
-3. Warmup de 500 req/s durante 3s para estabilizar o GC
-4. Medição real na taxa e duração configuradas
-5. Gera relatório texto, plot HTML e para o servidor
-6. Após as 3 sessões, imprime a tabela comparativa
+1. Verifica `vegeta` e `docker` no PATH.
+2. `docker compose up -d` e espera o MySQL ficar `healthy`.
+3. Compila o binário uma vez (`go build`).
+4. Para cada engine: inicia o servidor, espera o healthcheck, warmup de
+   500 req/s durante 3s para estabilizar o GC, e ataca a taxa/duração
+   configuradas contra `GET /v1/transaction/00000000-0000-0000-0000-000000000001`.
+5. Gera relatório texto + plot HTML por engine, para o servidor.
+6. Imprime a tabela comparativa e regista `summary.txt` + `combined.html`.
+7. `trap` no `EXIT` faz `docker compose down` mesmo em erro / Ctrl+C.
 
 ## Analisar resultados
 
@@ -119,9 +169,10 @@ lado a lado no browser.
 Se o throughput ficar abaixo do rate alvo, o servidor está a saturar nessa
 taxa. Nesse caso, compara o ponto de saturação entre os três engines.
 
-## Resultado exemplo
+## Resultado exemplo (baseline anterior, sem DB)
 
-Corrida em macOS arm64 a 5000 req/s × 30s no endpoint `/health`:
+Corrida em macOS arm64 a 5000 req/s × 30s no endpoint `/health` (JSON estático,
+sem MySQL):
 
 | Engine | Throughput | p50      | p95      | p99       | Success |
 |--------|------------|----------|----------|-----------|---------|
@@ -129,9 +180,10 @@ Corrida em macOS arm64 a 5000 req/s × 30s no endpoint `/health`:
 | gin    | 5000.02/s  | 39.4µs   | 66.9µs   | 124.7µs   | 100.00% |
 | fiber  | 5000.04/s  | 32.0µs   | 57.7µs   | 93.7µs    | 100.00% |
 
-A 5000 req/s nenhum engine satura — todos entregam 100%. Para diferenciar a
-sério, sobe a taxa (`./bench.sh 50000 30s` ou mais) até algum dos engines
-começar a perder throughput ou success ratio.
+Esta tabela serve de baseline para comparar com o novo target
+`GET /v1/transaction/:id`, que adiciona sqlx + driver + round-trip MySQL ao hot
+path. A 5000 req/s a base era 100% de sucesso sem saturar — o overhead da DB
+deve aparecer na latency, não no throughput.
 
 ## Notas
 
@@ -145,6 +197,12 @@ começar a perder throughput ou success ratio.
   percentil. Se usares uma versão antiga do vegeta que ainda produza
   `50th`/`95th`/`99th` em linhas próprias, a tabela comparativa final virá
   vazia (os ataques e os relatórios individuais continuam a funcionar).
+- O `mysql-init/01-schema.sql` só corre quando o MySQL inicializa um data dir
+  vazio. Para reaplicar (após mudar o schema ou seed): `docker compose down &&
+  rm -rf mysql-data && docker compose up -d`.
+- O adapter MySQL usa `parseTime=true` no DSN para que `time.Time` faça scan
+  da coluna `DATETIME`. Sem isso, `created_at` vem zero e o teste de integração
+  apanha a omissão.
 - O warmup antes de cada medição evita que o cold start do Go (GC, alocação
   inicial de goroutines) polua os resultados.
 - Para resultados consistentes, fecha aplicações que consumam CPU/rede e corre

@@ -12,11 +12,22 @@ import (
 	"syscall"
 	"time"
 
+	"example.com/httpdi/app"
+	"example.com/httpdi/db/mysql"
 	"example.com/httpdi/server"
 	"example.com/httpdi/server/fiberadapt"
 	"example.com/httpdi/server/ginadapt"
 	"example.com/httpdi/server/stdlib"
 )
+
+const defaultDSN = "httpdi:httpdipass@tcp(127.0.0.1:3306)/httpdi?parseTime=true"
+
+func dsnFromEnv() string {
+	if v := os.Getenv("DB_DSN"); v != "" {
+		return v
+	}
+	return defaultDSN
+}
 
 func newServer(engine string) server.Server {
 	switch engine {
@@ -29,35 +40,24 @@ func newServer(engine string) server.Server {
 	}
 }
 
-func healthHandler(_ context.Context, _ server.Request) server.Response {
-	return server.Response{
-		Status:  200,
-		Body:    []byte(`{"status":"ok"}`),
-		Headers: map[string]string{"Content-Type": "application/json"},
-	}
-}
-
-func helloHandler(_ context.Context, req server.Request) server.Response {
-	name := req.Params["name"]
-	if name == "" {
-		name = "world"
-	}
-	body := fmt.Sprintf(`{"hello":%q}`, name)
-	return server.Response{
-		Status:  200,
-		Body:    []byte(body),
-		Headers: map[string]string{"Content-Type": "application/json"},
-	}
-}
-
 func run() error {
 	engine := flag.String("engine", "stdlib", "HTTP engine: stdlib | gin | fiber")
 	addr := flag.String("addr", ":8080", "listen address")
+	dsn := flag.String("dsn", dsnFromEnv(), "MySQL DSN (or set DB_DSN)")
 	flag.Parse()
 
+	txRepo, err := mysql.New(*dsn)
+	if err != nil {
+		return fmt.Errorf("mysql: %w", err)
+	}
+	defer txRepo.Close()
+
+	application := app.New(txRepo)
+
 	srv := newServer(*engine)
-	srv.RegisterRoute("GET", "/health", healthHandler)
-	srv.RegisterRoute("GET", "/hello/:name", helloHandler)
+	srv.RegisterRoute("GET", "/health", application.Health)
+	srv.RegisterRoute("GET", "/hello/:name", application.Hello)
+	srv.RegisterRoute("GET", "/v1/transaction/:transaction_id", application.GetTransaction)
 
 	errCh := make(chan error, 1)
 	go func() {

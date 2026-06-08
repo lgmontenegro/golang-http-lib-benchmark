@@ -1,0 +1,24 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: httpdi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: httpdi
+      MYSQL_USER: httpdi
+      MYSQL_PASSWORD: httpdipass
+    ports:
+      - "3306:3306"
+    volumes:
+      # Bind mount: data persisted on the host at ./mysql-data so it
+      # survives `docker compose down` and is easy to inspect or wipe.
+      - ./mysql-data:/var/lib/mysql
+      # MySQL runs *.sql/*.sh in this dir once, on first init of an empty
+      # data dir. To re-apply schema/seed changes: wipe ./mysql-data.
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

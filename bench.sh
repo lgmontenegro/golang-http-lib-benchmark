@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bench.sh — benchmark comparativo: stdlib vs gin vs fiber
-# Requisitos: go, vegeta (go install github.com/tsenart/vegeta@latest)
+# Requisitos: go, vegeta (go install github.com/tsenart/vegeta@latest), docker
 # Uso: ./bench.sh [rate] [duration]
 #   rate     — requisições por segundo (default: 5000)
 #   duration — duração de cada sessão (default: 30s)
@@ -10,17 +10,47 @@ set -euo pipefail
 RATE="${1:-5000}"
 DURATION="${2:-30s}"
 ADDR=":8080"
-TARGET="GET http://localhost:${ADDR#:}/health"
+# Benchmark target: SELECT-by-id of a seeded transaction (see
+# mysql-init/01-schema.sql). Always the same row → measures
+# framework + sqlx + driver + MySQL hot path, no disk variance.
+BENCH_TX_ID="00000000-0000-0000-0000-000000000001"
+TARGET="GET http://localhost:${ADDR#:}/v1/transaction/${BENCH_TX_ID}"
 RESULTS_DIR="bench-results"
 ENGINES=("stdlib" "gin" "fiber")
 WARMUP_RATE=500
 WARMUP_DURATION="3s"
+MYSQL_CONTAINER="httpdi-mysql"
 
 command -v vegeta >/dev/null 2>&1 || {
     echo "erro: vegeta não encontrado"
     echo "  go install github.com/tsenart/vegeta@latest"
     exit 1
 }
+
+command -v docker >/dev/null 2>&1 || {
+    echo "erro: docker não encontrado"
+    exit 1
+}
+
+wait_for_mysql() {
+    local retries=60
+    while [ "$(docker inspect -f '{{.State.Health.Status}}' "$MYSQL_CONTAINER" 2>/dev/null)" != "healthy" ]; do
+        retries=$((retries - 1))
+        if [ "$retries" -le 0 ]; then
+            echo "erro: mysql não ficou healthy após 60s"
+            exit 1
+        fi
+        sleep 1
+    done
+}
+
+# trap garante que paramos o stack mesmo em caso de erro ou Ctrl+C.
+trap 'echo ""; echo "→ docker compose down"; docker compose down >/dev/null 2>&1 || true' EXIT
+
+echo "→ docker compose up -d"
+docker compose up -d
+wait_for_mysql
+echo "✓ mysql healthy"
 
 go build -o httpdi-bench .
 
