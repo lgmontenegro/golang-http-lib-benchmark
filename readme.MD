@@ -216,10 +216,44 @@ lado a lado no browser.
 Se o throughput ficar abaixo do rate alvo, o servidor está a saturar nessa
 taxa. Nesse caso, compara o ponto de saturação entre os três engines.
 
-## Resultado exemplo (baseline anterior, sem DB)
+## Resultado exemplo
 
-Corrida em macOS arm64 a 5000 req/s × 30s no endpoint `/health` (JSON estático,
-sem MySQL):
+### Corrida actual — `/v1/transaction/:id` com JOIN MySQL
+
+macOS arm64, 5000 req/s × 30s, dois modos por engine (executados back-to-back):
+
+| Engine  | Mode    | Throughput | p50       | p95       | p99           | Success |
+|---------|---------|------------|-----------|-----------|---------------|---------|
+| stdlib  | single  | 5000.0/s   | 422.3µs   | 508.1µs   | 651.8µs       | 100.00% |
+| stdlib  | cycled  | 5000.0/s   | 420.2µs   | 516.3µs   | 706.0µs       | 100.00% |
+| gin     | single  | 5000.0/s   | 417.6µs   | 507.1µs   | 717.2µs       | 100.00% |
+| gin     | cycled  | 5000.0/s   | 413.8µs   | 521.4µs   | **4.58ms** ⚠  | 100.00% |
+| fiber   | single  | 5000.0/s   | **353.6µs** | **431.3µs** | **605.7µs** | 100.00% |
+| fiber   | cycled  | 5000.0/s   | 356.0µs   | 432.2µs   | 598.5µs       | 100.00% |
+
+Leituras:
+
+- **Throughput** — os três aguentam 5000 req/s com 100% sucesso. Ninguém
+  satura aqui; é preciso subir a taxa para distinguir limites máximos
+  (`./bench.sh 20000 30s`, etc.).
+- **Fiber lidera** consistentemente em latência (~17% melhor p50 vs stdlib/gin),
+  mesmo padrão da baseline sem DB.
+- **`single` vs `cycled` é praticamente igual** em stdlib e fiber — confirma
+  que o working set (~15 MB de dados ativos) cabe no buffer pool default do
+  InnoDB (128 MB). O custo do JOIN é dominado pelo planner + index walk, não
+  por disco.
+- **Outlier do Gin em `cycled` p99 (4.58 ms)** — ~6× a média e ~9× o que o Gin
+  faz em `single`. Valor isolado dos 9 cells restantes; provavelmente uma
+  pausa de GC ou contention pontual. Vale uma re-execução para confirmar se é
+  repetível.
+- **Comparado à baseline** (próxima secção), JOIN + sqlx + MySQL adiciona
+  ~380 µs de p50 — a maior parte da latência agora é o caminho até à DB,
+  não framework.
+
+### Baseline anterior — `/health` estático (referência)
+
+Corrida em macOS arm64 a 5000 req/s × 30s no endpoint `/health` (JSON
+hardcoded, sem MySQL na cadeia):
 
 | Engine | Throughput | p50      | p95      | p99       | Success |
 |--------|------------|----------|----------|-----------|---------|
@@ -227,10 +261,10 @@ sem MySQL):
 | gin    | 5000.02/s  | 39.4µs   | 66.9µs   | 124.7µs   | 100.00% |
 | fiber  | 5000.04/s  | 32.0µs   | 57.7µs   | 93.7µs    | 100.00% |
 
-Esta tabela serve de baseline para comparar com o novo target
-`GET /v1/transaction/:id`, que adiciona sqlx + driver + round-trip MySQL ao hot
-path. A 5000 req/s a base era 100% de sucesso sem saturar — o overhead da DB
-deve aparecer na latency, não no throughput.
+A baseline servia para isolar o custo puro de framework. Comparando linha a
+linha com a corrida actual: p50 cresce ~10× (~40 µs → ~400 µs), confirmando
+que ~90% da latência hoje é DB + driver e ~10% framework. A ordem entre
+engines mantém-se.
 
 ## Notas
 
