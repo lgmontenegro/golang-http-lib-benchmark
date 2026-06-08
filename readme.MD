@@ -33,7 +33,8 @@ go-http-di/
 ├── db/
 │   └── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
 ├── mysql-init/
-│   └── 01-schema.sql             # DDL + seed; corre só no primeiro boot do MySQL
+│   ├── 01-schema.sql             # DDL das 3 tabelas; corre só no 1º boot
+│   └── 02-seed.sql               # Bulk seed via CTE recursiva (50k/150k/150k)
 ├── mysql-data/                   # Volume bind do MySQL (gitignored)
 └── bench-results/                # Gerado após benchmark (gitignored)
     ├── stdlib.bin / .txt / .html
@@ -60,9 +61,36 @@ rm -rf mysql-data                 # wipe total + re-aplicar 01-schema.sql no pr�
 ```
 
 Credenciais default (alterar antes de qualquer uso sério): user `httpdi`,
-password `httpdipass`, database `httpdi`. O ficheiro `mysql-init/01-schema.sql`
-cria a tabela `transactions` e insere 10 linhas com IDs determinísticos
-`00000000-0000-0000-0000-000000000001` a `…010`.
+password `httpdipass`, database `httpdi`. A inicialização está dividida em
+dois ficheiros que correm uma única vez quando o `mysql-data/` está vazio:
+
+- [`mysql-init/01-schema.sql`](mysql-init/01-schema.sql) — DDL das três
+  tabelas:
+  - `customer (id, nome, create_date)`.
+  - `` `transaction` (id, value, customer_id FK → customer, create_date) `` —
+    backtickada porque `TRANSACTION` é palavra reservada no MySQL.
+  - `cart_snapshot (id, transaction_id FK → transaction UNIQUE, create_date)`
+    — **1:1** com `transaction`.
+- [`mysql-init/02-seed.sql`](mysql-init/02-seed.sql) — bulk seed via CTE
+  recursiva:
+  - **50 000** customers (`Customer #1` .. `#50000`).
+  - **150 000** transactions (3 por customer; value aleatório 0–1000).
+  - **150 000** cart_snapshots (1:1 com transactions).
+
+IDs determinísticos: customer N é `11111111-…-LPAD(N,12,'0')`, transaction N
+é `00000000-…-LPAD(N,12,'0')`, cart_snapshot N é `22222222-…-LPAD(N,12,'0')`.
+A transaction N pertence ao customer `FLOOR((N-1)/3)+1` — portanto as
+transactions 1, 2 e 3 estão todas no customer 1. O ID `…001` em qualquer das
+três tabelas leva ao mesmo agregado (é onde o benchmark e o teste de
+integração batem).
+
+O endpoint `/v1/transaction/:id` faz `transaction ⋈ customer ⋈ cart_snapshot`
+(INNER JOIN dos três) e devolve um agregado denormalizado em JSON.
+
+**Primeiro boot ~30–60s** por causa do seed (o `wait_for_mysql` do bench.sh
+espera até 5 min). Boots seguintes ignoram a inicialização (~5s). Para
+reaplicar schema/seed: `docker compose down && rm -rf mysql-data && docker
+compose up -d`.
 
 ## Executar o servidor manualmente
 
@@ -122,17 +150,36 @@ chmod +x bench.sh
 ./bench.sh 10000 60s
 ```
 
-O script:
+O script corre **dois modos por engine**, back-to-back (sem reiniciar o
+servidor entre eles):
+
+- **`single`** — todos os pedidos batem na mesma row
+  (`…000000000001`). InnoDB mantém-a no buffer pool → mede o caminho
+  quente framework + sqlx + driver + MySQL com zero variância de cache.
+- **`cycled`** — vegeta cicla pelos 150 000 IDs seedados (ficheiro
+  `bench-results/targets-cycled.txt`, gerado no arranque). Exercita o
+  índice PK + JOIN em todo o dataset. O working set cabe nos 128 MB de
+  buffer pool default, portanto continua maioritariamente em cache; a
+  diferença para o `single` é sobretudo custo de index walk e
+  planner-work do JOIN.
+
+Cada modo tem o seu warmup de 500 req/s × 3s usando a *mesma fonte* que o
+ataque, para o runtime Go e qualquer setup per-target estabilizar antes
+da medição.
+
+Fluxo completo:
 
 1. Verifica `vegeta` e `docker` no PATH.
-2. `docker compose up -d` e espera o MySQL ficar `healthy`.
+2. `docker compose up -d` e espera o MySQL ficar `healthy` (até 5 min em
+   primeiro boot por causa do seed).
 3. Compila o binário uma vez (`go build`).
-4. Para cada engine: inicia o servidor, espera o healthcheck, warmup de
-   500 req/s durante 3s para estabilizar o GC, e ataca a taxa/duração
-   configuradas contra `GET /v1/transaction/00000000-0000-0000-0000-000000000001`.
-5. Gera relatório texto + plot HTML por engine, para o servidor.
-6. Imprime a tabela comparativa e regista `summary.txt` + `combined.html`.
-7. `trap` no `EXIT` faz `docker compose down` mesmo em erro / Ctrl+C.
+4. Gera o ficheiro de targets ciclados (150k linhas, ~12 MB).
+5. Para cada engine: inicia o servidor, espera o healthcheck, corre os
+   dois modos (single, cycled), pára o servidor.
+6. Gera relatório texto + plot HTML por (engine, mode) — 6 relatórios.
+7. Imprime a tabela comparativa de 6 linhas e regista `summary.txt` +
+   `combined.html` (3 cols × 2 modes).
+8. `trap` no `EXIT` faz `docker compose down` mesmo em erro / Ctrl+C.
 
 ## Analisar resultados
 

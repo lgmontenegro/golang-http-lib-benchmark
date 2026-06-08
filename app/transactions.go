@@ -6,15 +6,29 @@ import (
 	"time"
 )
 
-// Transaction is the financial transaction the system reads. Struct tags
-// describe both the SQL column mapping (consumed by sqlx in the mysql
-// adapter) and the JSON shape returned by the HTTP layer.
+// Customer is the buyer of a transaction.
+type Customer struct {
+	ID         string    `json:"id"`
+	Nome       string    `json:"nome"`
+	CreateDate time.Time `json:"create_date"`
+}
+
+// CartSnapshot captures the cart state at checkout time. Modelled 1:1 with
+// Transaction in the current schema.
+type CartSnapshot struct {
+	ID         string    `json:"id"`
+	CreateDate time.Time `json:"create_date"`
+}
+
+// Transaction is the denormalised aggregate the API returns: the transaction
+// row plus the customer and cart_snapshot it points at. Adapters are
+// responsible for assembling this from whatever storage shape they use.
 type Transaction struct {
-	ID        string    `db:"id" json:"id"`
-	Amount    float64   `db:"amount" json:"amount"`
-	Currency  string    `db:"currency" json:"currency"`
-	Status    string    `db:"status" json:"status"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	ID           string       `json:"id"`
+	Value        float64      `json:"value"`
+	CreateDate   time.Time    `json:"create_date"`
+	Customer     Customer     `json:"customer"`
+	CartSnapshot CartSnapshot `json:"cart_snapshot"`
 }
 
 // TransactionRepository is the driven port for transaction storage.

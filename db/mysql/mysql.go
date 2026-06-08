@@ -33,19 +33,68 @@ func New(dsn string) (*TransactionRepo, error) {
 	return &TransactionRepo{db: db}, nil
 }
 
-// GetByID returns the transaction row identified by id, or
-// app.ErrTransactionNotFound if no row matches.
+// transactionRow is the flat row produced by the JOIN, with column aliases
+// matching the SELECT below. It exists so the domain types in app/ stay
+// free of `db:` tags and infrastructure concerns.
+type transactionRow struct {
+	TransactionID          string    `db:"transaction_id"`
+	TransactionValue       float64   `db:"transaction_value"`
+	TransactionCreateDate  time.Time `db:"transaction_create_date"`
+	CustomerID             string    `db:"customer_id"`
+	CustomerNome           string    `db:"customer_nome"`
+	CustomerCreateDate     time.Time `db:"customer_create_date"`
+	CartSnapshotID         string    `db:"cart_snapshot_id"`
+	CartSnapshotCreateDate time.Time `db:"cart_snapshot_create_date"`
+}
+
+func (r transactionRow) toDomain() app.Transaction {
+	return app.Transaction{
+		ID:         r.TransactionID,
+		Value:      r.TransactionValue,
+		CreateDate: r.TransactionCreateDate,
+		Customer: app.Customer{
+			ID:         r.CustomerID,
+			Nome:       r.CustomerNome,
+			CreateDate: r.CustomerCreateDate,
+		},
+		CartSnapshot: app.CartSnapshot{
+			ID:         r.CartSnapshotID,
+			CreateDate: r.CartSnapshotCreateDate,
+		},
+	}
+}
+
+const getTransactionByIDQuery = `
+SELECT
+    t.id           AS transaction_id,
+    t.value        AS transaction_value,
+    t.create_date  AS transaction_create_date,
+    c.id           AS customer_id,
+    c.nome         AS customer_nome,
+    c.create_date  AS customer_create_date,
+    cs.id          AS cart_snapshot_id,
+    cs.create_date AS cart_snapshot_create_date
+FROM ` + "`transaction`" + ` t
+JOIN customer       c  ON c.id  = t.customer_id
+JOIN cart_snapshot  cs ON cs.transaction_id = t.id
+WHERE t.id = ?
+`
+
+// GetByID joins transaction → customer + cart_snapshot and returns the
+// denormalised aggregate. Returns app.ErrTransactionNotFound if no row
+// matches. A transaction without a matching cart_snapshot would also
+// surface as ErrTransactionNotFound because of the INNER JOIN — that's
+// intentional: the schema constrains the relationship to 1:1.
 func (r *TransactionRepo) GetByID(ctx context.Context, id string) (app.Transaction, error) {
-	var tx app.Transaction
-	err := r.db.GetContext(ctx, &tx,
-		"SELECT id, amount, currency, status, created_at FROM transactions WHERE id = ?", id)
+	var row transactionRow
+	err := r.db.GetContext(ctx, &row, getTransactionByIDQuery, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return app.Transaction{}, app.ErrTransactionNotFound
 	}
 	if err != nil {
 		return app.Transaction{}, fmt.Errorf("get transaction %s: %w", id, err)
 	}
-	return tx, nil
+	return row.toDomain(), nil
 }
 
 // Close releases the underlying connection pool.

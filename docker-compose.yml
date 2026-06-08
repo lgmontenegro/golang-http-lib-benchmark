@@ -18,7 +18,15 @@ services:
       # data dir. To re-apply schema/seed changes: wipe ./mysql-data.
       - ./mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpass"]
+      # -h 127.0.0.1 forces TCP so the probe only passes once the real
+      # mysqld is listening on 3306. During init MySQL runs a temporary
+      # server with --skip-networking; -h localhost would tunnel through
+      # the Unix socket and mark the container healthy too early, causing
+      # client connects from the host to fail with "unexpected EOF".
+      test: ["CMD", "mysqladmin", "-h", "127.0.0.1", "-uroot", "-prootpass", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
+      # First boot runs ~150k seed INSERTs before mysqld real-starts.
+      # start_period suppresses unhealthy until init has a chance to finish.
+      start_period: 120s
