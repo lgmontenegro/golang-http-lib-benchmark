@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-HTTP framework benchmark / hexagonal-architecture proof of concept in Go. The front service ([main.go](main.go)) serves the same routes (`/health`, `/hello/:name`, `/v1/transaction/:transaction_id`) through one of five swappable HTTP backends — stdlib `net/http`, Gin, Fiber, Echo, or chi — selected by the `-engine` flag. The transaction endpoint can run two ways selected by `-repo`:
+HTTP framework benchmark / hexagonal-architecture proof of concept in Go. The front service ([main.go](main.go)) serves the same routes (`/health`, `/hello/:name`, `/v1/transaction/:transaction_id`) through one of five swappable HTTP backends — stdlib `net/http`, Gin, Fiber, Echo, or chi — selected by the `-engine` flag. The transaction endpoint can run three ways selected by `-repo`:
 
 - `mysql` (default) — in-process: the front talks to MySQL directly via sqlx + `db/mysql`.
-- `rest` — over the network: the front delegates to [cmd/dataservice](cmd/dataservice/) (a separate binary that owns MySQL) via HTTP+JSON.
+- `rest` — over the network: the front delegates to [cmd/dataservice](cmd/dataservice/) over HTTP+JSON.
+- `grpc` — over the network: same dataservice, gRPC instead (`-repo-addr` becomes `host:port`).
 
-This lets us measure the same `/v1/transaction/:id` aggregate (`transaction` ⋈ `customer` ⋈ `cart_snapshot`) under both in-process and microservice topologies. `bench.sh` runs vegeta against each engine in turn and produces a comparative report.
+The dataservice exposes both REST and gRPC on separate ports (default `:9090` and `:9091`), so a single binary covers both protocols and the front picks at startup. This lets us measure the same `/v1/transaction/:id` aggregate (`transaction` ⋈ `customer` ⋈ `cart_snapshot`) under in-process, REST microservice, and gRPC microservice topologies. `bench.sh` runs vegeta against each engine in turn and produces a comparative report.
 
 The README is in Portuguese (`readme.MD`).
 
@@ -17,8 +18,11 @@ The README is in Portuguese (`readme.MD`).
 
 ```
 main.go                              # front service: composition root, picks engine + repo
-cmd/dataservice/main.go              # data service: owns MySQL, exposes GET /v1/transaction/{id}
-cmd/dataservice/handler.go           #   handler logic, constructor-injected with a TransactionRepository
+cmd/dataservice/main.go              # data service: owns MySQL, exposes REST + gRPC
+cmd/dataservice/handler.go           #   REST handler (stdlib net/http)
+cmd/dataservice/grpc.go              #   gRPC service impl (TransactionService.GetById)
+proto/transactions.proto             # gRPC wire schema
+proto/transactionspb/                # generated Go stubs (committed; only regen when proto changes)
 app/app.go                           # package app — application core, handlers, driven-port fields
 app/transactions.go                  # Transaction type + TransactionRepository port + sentinel error
 server/server.go                     # package server — Request/Response/HandlerFunc/Server contract
@@ -31,6 +35,7 @@ server/internal/routeutil/           # `:name` ↔ `{name}` translation (shared 
 server/internal/servertest/          # shared HTTP integration suite for adapter tests
 db/mysql/mysql.go                    # MySQL adapter for TransactionRepository (sqlx)
 db/restclient/restclient.go          # REST client adapter (front → dataservice over HTTP+JSON)
+db/grpcclient/grpcclient.go          # gRPC client adapter (front → dataservice over HTTP/2 + protobuf)
 docker-compose.yml                   # MySQL 8.0, bind-mounted data + init scripts
 mysql-init/01-schema.sql             # DDL only — runs once on first init
 mysql-init/02-seed.sql               # bulk seed via recursive CTE (50k/150k/150k rows)
@@ -56,9 +61,19 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000
 go run main.go -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 
-# Front service — REST repo (the front delegates to the dataservice)
-go run ./cmd/dataservice -addr :9090           # terminal A: dataservice owns MySQL
-go run main.go -repo rest -repo-addr http://localhost:9090   # terminal B: front
+# Microservice topology (front delegates to dataservice)
+# Terminal A: dataservice owns MySQL, serves REST on :9090 + gRPC on :9091
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091
+
+# Terminal B: front picks the protocol
+go run main.go -repo rest -repo-addr http://localhost:9090
+go run main.go -repo grpc -repo-addr localhost:9091
+
+# Regenerate proto stubs (only needed when proto/transactions.proto changes)
+PATH="$(go env GOPATH)/bin:$PATH" protoc \
+  --go_out=. --go_opt=module=example.com/httpdi \
+  --go-grpc_out=. --go-grpc_opt=module=example.com/httpdi \
+  proto/transactions.proto
 
 # Smoke test (works the same regardless of -repo)
 curl http://localhost:8080/health
@@ -95,6 +110,7 @@ There is no lint config or CI in the repo.
 - **[server/internal/servertest/servertest.go](server/internal/servertest/servertest.go)** — shared HTTP integration suite. Registers a `/health` and `/hello/:name` on a given `server.Server`, starts it on a port the caller picks, hits it over real HTTP, then `Shutdown`s. Each adapter test calls `servertest.RunSuite(t, New(), ":1808X")` with a unique port so packages can run in parallel.
 - **[cmd/dataservice/handler_test.go](cmd/dataservice/handler_test.go)** — dataservice handler tests with a `fakeTxRepo`; covers 200/404/500 via `httptest.NewRecorder`. No network, no DB.
 - **[db/restclient/restclient_test.go](db/restclient/restclient_test.go)** — REST client tests against `httptest.NewServer` stubs. Covers 200 round-trip (compared with `reflect.DeepEqual`), 404 → `ErrTransactionNotFound`, 5xx → wrapped non-sentinel error, and URL escaping of IDs with special characters.
+- **[db/grpcclient/grpcclient_test.go](db/grpcclient/grpcclient_test.go)** — gRPC client tests against a real `grpc.Server` on an ephemeral TCP port with a fake `TransactionServiceServer`. Covers 200 round-trip, `codes.NotFound` → `ErrTransactionNotFound`, and `codes.Internal` → wrapped non-sentinel error.
 - **[db/mysql/mysql_test.go](db/mysql/mysql_test.go)** — MySQL adapter integration test, gated by `//go:build integration`. Requires `docker compose up -d` (or another MySQL with the schema/seed). Run with `go test -tags integration ./db/mysql`. Default `go test ./...` skips it.
 - Adapter ports: stdlib `:18081`, gin `:18082`, fiber `:18083`, echo `:18084`, chi `:18085`. Bump these if your machine has them busy.
 
@@ -107,10 +123,12 @@ The point of the project is the seams, not the handlers. Hexagonal: driving port
 - **[app/app.go](app/app.go) is the application core.** The `App` struct holds outbound dependencies (driven ports — repositories, clients, ...) as interface fields. Its methods match the `server.HandlerFunc` signature so they can be registered directly on any `server.Server` adapter. When adding a new endpoint, add a method on `App`; when adding a new outbound dependency, add an interface field on `App` and an adapter package outside `app/`.
 - **[app/transactions.go](app/transactions.go) defines a driven port.** `TransactionRepository` is the contract; `Transaction` is the domain aggregate with nested `Customer` and `CartSnapshot`. Domain types carry **only `json:` tags** — they're infrastructure-free. `ErrTransactionNotFound` is the sentinel adapters must return for missing rows so the handler can translate to 404. New driven ports follow the same shape: interface + sentinels in `app/`, implementation in a sibling top-level package.
 - **[db/mysql/mysql.go](db/mysql/mysql.go) implements `TransactionRepository`** with sqlx + go-sql-driver/mysql. The JOIN query is held in `getTransactionByIDQuery`; results scan into an internal `transactionRow` DTO (flat, aliased columns, carries the `db:` tags), then `toDomain()` assembles `app.Transaction`. This keeps SQL-shape coupling inside `db/mysql/` instead of leaking into the domain. Pool tuned for the benchmark (`SetMaxOpenConns(100)`, `SetMaxIdleConns(50)`). Maps `sql.ErrNoRows` to `app.ErrTransactionNotFound`.
-- **[db/restclient/restclient.go](db/restclient/restclient.go) is the alternate adapter.** Same `TransactionRepository` interface, but the row comes from the dataservice over HTTP+JSON instead of MySQL. HTTP 404 maps back to `app.ErrTransactionNotFound` so the front handler logic is identical regardless of `-repo`. `http.Client` has a 5s timeout; no pooling beyond Go's default transport (good enough for the benchmark).
-- **[cmd/dataservice/](cmd/dataservice/)** is the data tier. Owns the MySQL connection (via `db/mysql`), exposes `GET /v1/transaction/{id}` on stdlib `net/http` (deliberately — we want a stable framework-free floor on the back so the measurement isolates *front + protocol + back*, not back-framework noise). `handler.go` is constructor-injected with `app.TransactionRepository`, so tests can drive it with a fake.
+- **[db/restclient/restclient.go](db/restclient/restclient.go) is the REST adapter.** Same `TransactionRepository` interface, but the row comes from the dataservice over HTTP+JSON instead of MySQL. HTTP 404 maps back to `app.ErrTransactionNotFound` so the front handler logic is identical regardless of `-repo`. `http.Client` has a 5s timeout; no pooling beyond Go's default transport (good enough for the benchmark).
+- **[db/grpcclient/grpcclient.go](db/grpcclient/grpcclient.go) is the gRPC adapter.** Same shape, dials the dataservice's TransactionService with insecure credentials (loopback/LAN). The generated stubs are in [proto/transactionspb/](proto/transactionspb/) — committed so `go build` works without protoc. gRPC `codes.NotFound` is translated back to `app.ErrTransactionNotFound`. The `ClientConn` is long-lived; close it on shutdown.
+- **[cmd/dataservice/](cmd/dataservice/)** is the data tier. Owns the MySQL connection (via `db/mysql`) and serves *both* REST (`handler.go`, stdlib `net/http`) and gRPC (`grpc.go`, `grpc.Server`) over the same repository — deliberately the dataservice's REST is on stdlib so we have a stable, framework-free floor on the back; the measurement isolates *front + protocol + back* rather than back-framework noise. Both server impls are constructor-injected with `app.TransactionRepository`.
+- **[proto/transactions.proto](proto/transactions.proto) is the gRPC wire schema.** Mirrors `app.Transaction`. `google.protobuf.Timestamp` for dates; field numbers are stable forever (proto3 wire compatibility). Regenerate stubs only when this file changes (see Common commands).
 - **`transaction` is a MySQL reserved word** — backtick it (`` `transaction` ``) in every query. The constant in `getTransactionByIDQuery` uses Go string concatenation to keep the backticks readable inside the raw-string literal.
-- **[main.go](main.go) is the composition root** — wiring only, no handler logic. `newServer(engine)` picks the inbound adapter; `newRepo(kind, dsn, repoAddr)` picks the driven adapter (`mysql` or `rest`) and returns a cleanup func; `app.New(txRepo)` injects it into the core. Adding a new HTTP framework = new adapter package + one case in `newServer`. Adding a new driven adapter (Postgres, in-memory, gRPC client) = new package implementing the existing port; one case in `newRepo`.
+- **[main.go](main.go) is the composition root** — wiring only, no handler logic. `newServer(engine)` picks the inbound adapter; `newRepo(kind, dsn, repoAddr)` picks the driven adapter (`mysql`, `rest`, or `grpc`) and returns a cleanup func; `app.New(txRepo)` injects it into the core. Adding a new HTTP framework = new adapter package + one case in `newServer`. Adding a new driven adapter (Postgres, in-memory, another protocol) = new package implementing the existing port; one case in `newRepo`.
 
 ### Database schema
 

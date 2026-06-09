@@ -1,7 +1,9 @@
 // Command httpdi is the front HTTP gateway. The -engine flag picks the
 // HTTP framework (stdlib, gin, fiber, echo, chi) and the -repo flag picks
-// the TransactionRepository implementation (mysql for in-process direct,
-// or rest to delegate to the dataservice over HTTP+JSON).
+// the TransactionRepository implementation:
+//   mysql — in-process via sqlx (the default).
+//   rest  — delegates to cmd/dataservice over HTTP+JSON.
+//   grpc  — delegates to cmd/dataservice over gRPC.
 package main
 
 import (
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"example.com/httpdi/app"
+	"example.com/httpdi/db/grpcclient"
 	"example.com/httpdi/db/mysql"
 	"example.com/httpdi/db/restclient"
 	"example.com/httpdi/server"
@@ -53,12 +56,19 @@ func newServer(engine string) server.Server {
 }
 
 // newRepo builds the TransactionRepository selected by -repo and returns
-// a cleanup func to defer. The mysql variant owns the connection pool;
-// the rest variant has nothing to close (transient HTTP connections).
+// a cleanup func to defer. mysql owns the connection pool; rest is a
+// stateless HTTP client (nothing to close); grpc owns a long-lived
+// ClientConn that must be closed.
 func newRepo(kind, dsn, repoAddr string) (app.TransactionRepository, func() error, error) {
 	switch kind {
 	case "rest":
 		return restclient.New(repoAddr), func() error { return nil }, nil
+	case "grpc":
+		client, err := grpcclient.New(repoAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("grpc: %w", err)
+		}
+		return client, client.Close, nil
 	default: // "mysql"
 		repo, err := mysql.New(dsn)
 		if err != nil {
@@ -71,9 +81,9 @@ func newRepo(kind, dsn, repoAddr string) (app.TransactionRepository, func() erro
 func run() error {
 	engine := flag.String("engine", "stdlib", "HTTP engine: stdlib | gin | fiber | echo | chi")
 	addr := flag.String("addr", ":8080", "listen address")
-	repoKind := flag.String("repo", "mysql", "TransactionRepository: mysql | rest")
+	repoKind := flag.String("repo", "mysql", "TransactionRepository: mysql | rest | grpc")
 	dsn := flag.String("dsn", dsnFromEnv(), "MySQL DSN (used when -repo=mysql; also reads DB_DSN)")
-	repoAddr := flag.String("repo-addr", defaultRepoAddr, "dataservice base URL (used when -repo=rest)")
+	repoAddr := flag.String("repo-addr", defaultRepoAddr, "dataservice address (URL for rest, host:port for grpc; e.g. localhost:9091)")
 	flag.Parse()
 
 	txRepo, cleanup, err := newRepo(*repoKind, *dsn, *repoAddr)

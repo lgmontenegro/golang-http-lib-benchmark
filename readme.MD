@@ -10,18 +10,21 @@ A proof of concept demonstrating dependency inversion in Go to swap between
 five HTTP frameworks (stdlib, Gin, Fiber, Echo, chi) and compare their
 performance under steady load with vegeta.
 
-The front service can resolve the transaction aggregate in two ways
+The front service can resolve the transaction aggregate in three ways
 selected by the `-repo` flag:
 
 - **`mysql`** *(default)* — in-process: front talks to MySQL directly via
   sqlx.
 - **`rest`** — over the network: front delegates to a separate
-  **dataservice** (`cmd/dataservice`) over HTTP+JSON. The dataservice owns
-  the MySQL connection.
+  **dataservice** (`cmd/dataservice`) over HTTP+JSON.
+- **`grpc`** — over the network: same dataservice, gRPC (HTTP/2 +
+  protobuf) instead of REST.
 
-Same shape, same JSON, same `app.TransactionRepository` interface — only
-the adapter differs. The benchmark covers the full path: framework + (sqlx
-or REST hop) + MySQL.
+The dataservice owns the MySQL connection and exposes both REST and gRPC
+from the same binary (`:9090` and `:9091` by default), so the front picks
+the protocol at startup. Same shape, same `app.TransactionRepository`
+interface — only the adapter differs. The benchmark covers the full path:
+framework + (sqlx or REST hop or gRPC hop) + MySQL.
 
 ### Table of contents
 
@@ -54,10 +57,14 @@ go install github.com/tsenart/vegeta@latest
 go-http-di/
 ├── main.go                       # Front service: composition root, -engine + -repo
 ├── cmd/
-│   └── dataservice/              # Data service: owns MySQL, exposes REST
+│   └── dataservice/              # Data service: owns MySQL, exposes REST + gRPC
 │       ├── main.go
-│       ├── handler.go
-│       └── handler_test.go
+│       ├── handler.go            # REST handler (stdlib net/http)
+│       ├── handler_test.go
+│       └── grpc.go               # gRPC TransactionService impl
+├── proto/
+│   ├── transactions.proto        # gRPC wire schema
+│   └── transactionspb/           # generated Go stubs (committed)
 ├── bench.sh                      # Comparative benchmark script
 ├── docker-compose.yml            # MySQL 8.0 with bind mount
 ├── app/
@@ -72,7 +79,8 @@ go-http-di/
 │   └── chiadapt/chi.go           # chi adapter
 ├── db/
 │   ├── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
-│   └── restclient/restclient.go  # REST client adapter (front → dataservice)
+│   ├── restclient/restclient.go  # REST client adapter (front → dataservice over HTTP+JSON)
+│   └── grpcclient/grpcclient.go  # gRPC client adapter (front → dataservice over HTTP/2 + protobuf)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL for the 3 tables; runs only on first boot
 │   └── 02-seed.sql               # Bulk seed via recursive CTE (50k/150k/150k)
@@ -150,14 +158,26 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-**REST microservice** (front delegates to the dataservice; two terminals):
+**Microservice topology — REST or gRPC** (two terminals):
 
 ```bash
-# Terminal A: data tier (owns MySQL, REST on :9090)
-go run ./cmd/dataservice -addr :9090
+# Terminal A: data tier (owns MySQL, REST :9090 + gRPC :9091)
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091
 
-# Terminal B: front (any engine, talks to the dataservice)
+# Terminal B: front picks the protocol (any engine)
 go run main.go -engine fiber -repo rest -repo-addr http://localhost:9090
+go run main.go -engine fiber -repo grpc -repo-addr localhost:9091
+```
+
+Regenerate the proto stubs **only when [proto/transactions.proto](proto/transactions.proto)
+changes** (needs `protoc` + `protoc-gen-go` + `protoc-gen-go-grpc` — see
+the Notes at the bottom):
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" protoc \
+  --go_out=. --go_opt=module=example.com/httpdi \
+  --go-grpc_out=. --go-grpc_opt=module=example.com/httpdi \
+  proto/transactions.proto
 ```
 
 Smoke test (same regardless of `-repo`):
@@ -351,6 +371,15 @@ today's latency is DB + driver and ~10% framework.
   goroutine allocation) from polluting results.
 - For consistent results, close CPU/network-heavy apps and run several
   iterations.
+- Generated proto stubs (`proto/transactionspb/`) are committed, so plain
+  `go build` works without `protoc`. To regenerate (only after editing
+  `transactions.proto`):
+  ```bash
+  brew install protobuf
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+  ```
+  Then run the `protoc` command in the Microservice topology section.
 
 ---
 
@@ -360,18 +389,21 @@ Prova de conceito que demonstra inversão de dependência em Go para trocar
 entre cinco frameworks HTTP (stdlib, Gin, Fiber, Echo, chi) e comparar as
 suas performances sob carga constante com vegeta.
 
-O serviço front pode resolver o agregado de duas formas, selecionadas
+O serviço front pode resolver o agregado de três formas, selecionadas
 pela flag `-repo`:
 
 - **`mysql`** *(default)* — in-process: o front fala com o MySQL
   directamente via sqlx.
 - **`rest`** — sobre a rede: o front delega num **dataservice** separado
-  (`cmd/dataservice`) por HTTP+JSON. O dataservice é o dono da ligação ao
-  MySQL.
+  (`cmd/dataservice`) por HTTP+JSON.
+- **`grpc`** — sobre a rede: mesmo dataservice, gRPC (HTTP/2 + protobuf)
+  em vez de REST.
 
-Mesmo shape, mesmo JSON, mesma interface `app.TransactionRepository` —
-só muda o adapter. O benchmark cobre o caminho completo: framework +
-(sqlx ou hop REST) + MySQL.
+O dataservice é o dono da ligação ao MySQL e expõe REST e gRPC no mesmo
+binário (`:9090` e `:9091` por default), portanto o front escolhe o
+protocolo no arranque. Mesma shape, mesma interface
+`app.TransactionRepository` — só muda o adapter. O benchmark cobre o
+caminho completo: framework + (sqlx ou hop REST ou hop gRPC) + MySQL.
 
 ### Índice
 
@@ -404,10 +436,14 @@ go install github.com/tsenart/vegeta@latest
 go-http-di/
 ├── main.go                       # Serviço front: composition root, -engine + -repo
 ├── cmd/
-│   └── dataservice/              # Serviço de dados: dono do MySQL, expõe REST
+│   └── dataservice/              # Serviço de dados: dono do MySQL, expõe REST + gRPC
 │       ├── main.go
-│       ├── handler.go
-│       └── handler_test.go
+│       ├── handler.go            # Handler REST (stdlib net/http)
+│       ├── handler_test.go
+│       └── grpc.go               # Implementação do TransactionService em gRPC
+├── proto/
+│   ├── transactions.proto        # Schema gRPC
+│   └── transactionspb/           # Stubs Go gerados (commitados)
 ├── bench.sh                      # Script de benchmark comparativo
 ├── docker-compose.yml            # MySQL 8.0 com bind mount
 ├── app/
@@ -422,7 +458,8 @@ go-http-di/
 │   └── chiadapt/chi.go           # Adapter chi
 ├── db/
 │   ├── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
-│   └── restclient/restclient.go  # Adapter REST client (front → dataservice)
+│   ├── restclient/restclient.go  # Adapter REST client (front → dataservice por HTTP+JSON)
+│   └── grpcclient/grpcclient.go  # Adapter gRPC client (front → dataservice por HTTP/2 + protobuf)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL das 3 tabelas; corre só no 1º boot
 │   └── 02-seed.sql               # Bulk seed via CTE recursiva (50k/150k/150k)
@@ -500,14 +537,26 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-**Microserviço REST** (front delega no dataservice; dois terminais):
+**Microserviço — REST ou gRPC** (dois terminais):
 
 ```bash
-# Terminal A: serviço de dados (dono do MySQL, REST em :9090)
-go run ./cmd/dataservice -addr :9090
+# Terminal A: serviço de dados (dono do MySQL, REST :9090 + gRPC :9091)
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091
 
-# Terminal B: front (qualquer engine, fala com o dataservice)
+# Terminal B: front escolhe o protocolo (qualquer engine)
 go run main.go -engine fiber -repo rest -repo-addr http://localhost:9090
+go run main.go -engine fiber -repo grpc -repo-addr localhost:9091
+```
+
+Regenerar os stubs proto **só quando o [proto/transactions.proto](proto/transactions.proto)
+mudar** (precisa de `protoc` + `protoc-gen-go` + `protoc-gen-go-grpc` —
+ver Notas no fim):
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" protoc \
+  --go_out=. --go_opt=module=example.com/httpdi \
+  --go-grpc_out=. --go-grpc_opt=module=example.com/httpdi \
+  proto/transactions.proto
 ```
 
 Testar (smoke, igual independentemente do `-repo`):
@@ -706,3 +755,12 @@ framework.
   inicial de goroutines) polua os resultados.
 - Para resultados consistentes, fecha aplicações que consumam CPU/rede e corre
   várias iterações.
+- Os stubs proto gerados (`proto/transactionspb/`) estão commitados, portanto o
+  `go build` funciona sem `protoc`. Para regenerar (só depois de editar
+  `transactions.proto`):
+  ```bash
+  brew install protobuf
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+  ```
+  E depois corre o comando `protoc` na secção do microserviço.
