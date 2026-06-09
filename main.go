@@ -15,6 +15,8 @@ import (
 	"example.com/httpdi/app"
 	"example.com/httpdi/db/mysql"
 	"example.com/httpdi/server"
+	"example.com/httpdi/server/chiadapt"
+	"example.com/httpdi/server/echoadapt"
 	"example.com/httpdi/server/fiberadapt"
 	"example.com/httpdi/server/ginadapt"
 	"example.com/httpdi/server/stdlib"
@@ -35,13 +37,17 @@ func newServer(engine string) server.Server {
 		return ginadapt.New()
 	case "fiber":
 		return fiberadapt.New()
+	case "echo":
+		return echoadapt.New()
+	case "chi":
+		return chiadapt.New()
 	default:
 		return stdlib.New()
 	}
 }
 
 func run() error {
-	engine := flag.String("engine", "stdlib", "HTTP engine: stdlib | gin | fiber")
+	engine := flag.String("engine", "stdlib", "HTTP engine: stdlib | gin | fiber | echo | chi")
 	addr := flag.String("addr", ":8080", "listen address")
 	dsn := flag.String("dsn", dsnFromEnv(), "MySQL DSN (or set DB_DSN)")
 	flag.Parse()

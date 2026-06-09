@@ -1,39 +1,38 @@
-// Package stdlib adapts net/http to the server.Server interface.
-package stdlib
+// Package chiadapt adapts go-chi to the server.Server interface.
+package chiadapt
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 
 	"example.com/httpdi/server"
 	"example.com/httpdi/server/internal/routeutil"
 )
 
-// Adapter wraps the standard library HTTP server.
+// Adapter wraps a chi.Router.
 type Adapter struct {
-	mux *http.ServeMux
+	r   chi.Router
 	srv *http.Server
 }
 
-// New returns a ready-to-use standard library adapter.
+// New returns a ready-to-use chi adapter.
 func New() *Adapter {
-	return &Adapter{mux: http.NewServeMux()}
+	return &Adapter{r: chi.NewRouter()}
 }
 
-// RegisterRoute binds a handler using the Go 1.22+ "METHOD /path" pattern.
-// Path params are accepted in the shared `:name` convention and rewritten
-// via routeutil to ServeMux's `{name}` wildcards so the same route string
-// works across all adapters.
+// RegisterRoute binds a handler to the chi router. chi uses `{name}`
+// wildcards (the same shape as Go 1.22+ ServeMux), so we translate the
+// canonical `:name` form through routeutil at register-time.
 func (a *Adapter) RegisterRoute(method, path string, h server.HandlerFunc) {
-	stdPath, paramNames := routeutil.TranslateColonToBrace(path)
-	pattern := fmt.Sprintf("%s %s", method, stdPath)
-	a.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+	chiPath, paramNames := routeutil.TranslateColonToBrace(path)
+	a.r.MethodFunc(method, chiPath, func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("stdlib: failed to read body: %v", err)
+			log.Printf("chi: failed to read body: %v", err)
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
 			return
 		}
@@ -41,7 +40,7 @@ func (a *Adapter) RegisterRoute(method, path string, h server.HandlerFunc) {
 
 		params := make(map[string]string, len(paramNames))
 		for _, name := range paramNames {
-			params[name] = r.PathValue(name)
+			params[name] = chi.URLParam(r, name)
 		}
 
 		req := server.Request{
@@ -58,7 +57,7 @@ func (a *Adapter) RegisterRoute(method, path string, h server.HandlerFunc) {
 
 // Start begins listening on the given address.
 func (a *Adapter) Start(addr string) error {
-	a.srv = &http.Server{Addr: addr, Handler: a.mux}
+	a.srv = &http.Server{Addr: addr, Handler: a.r}
 	return a.srv.ListenAndServe()
 }
 
@@ -73,6 +72,6 @@ func writeResponse(w http.ResponseWriter, resp server.Response) {
 	}
 	w.WriteHeader(resp.Status)
 	if _, err := w.Write(resp.Body); err != nil {
-		log.Printf("stdlib: failed to write response: %v", err)
+		log.Printf("chi: failed to write response: %v", err)
 	}
 }

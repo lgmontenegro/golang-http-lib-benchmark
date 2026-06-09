@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-HTTP framework benchmark / hexagonal-architecture proof of concept in Go. A single CLI binary serves the same routes (`/health`, `/hello/:name`, `/v1/transaction/:transaction_id`) through one of three swappable HTTP backends — stdlib `net/http`, Gin, or Fiber — selected by the `-engine` flag. The transaction endpoint joins three MySQL tables (`transaction` → `customer`, `transaction` → `cart_snapshot`) via sqlx and returns a denormalised aggregate, so the benchmark measures the full path: framework + sqlx + driver + MySQL planner/joins. `bench.sh` runs vegeta against each engine in turn and produces a comparative report.
+HTTP framework benchmark / hexagonal-architecture proof of concept in Go. A single CLI binary serves the same routes (`/health`, `/hello/:name`, `/v1/transaction/:transaction_id`) through one of five swappable HTTP backends — stdlib `net/http`, Gin, Fiber, Echo, or chi — selected by the `-engine` flag. The transaction endpoint joins three MySQL tables (`transaction` → `customer`, `transaction` → `cart_snapshot`) via sqlx and returns a denormalised aggregate, so the benchmark measures the full path: framework + sqlx + driver + MySQL planner/joins. `bench.sh` runs vegeta against each engine in turn and produces a comparative report.
 
 The README is in Portuguese (`readme.MD`).
 
@@ -18,6 +18,9 @@ server/server.go                     # package server — Request/Response/Handl
 server/stdlib/stdlib.go              # package stdlib — net/http adapter
 server/ginadapt/gin.go               # package ginadapt — Gin adapter
 server/fiberadapt/fiber.go           # package fiberadapt — Fiber adapter
+server/echoadapt/echo.go             # package echoadapt — Echo adapter
+server/chiadapt/chi.go               # package chiadapt — chi adapter
+server/internal/routeutil/           # `:name` ↔ `{name}` translation (shared by stdlib + chi)
 server/internal/servertest/          # shared HTTP integration suite for adapter tests
 db/mysql/mysql.go                    # MySQL adapter for TransactionRepository (sqlx)
 docker-compose.yml                   # MySQL 8.0, bind-mounted data + init scripts
@@ -40,6 +43,8 @@ rm -rf mysql-data              # wipe and re-run init script
 go run main.go                 # stdlib (default)
 go run main.go -engine gin
 go run main.go -engine fiber
+go run main.go -engine echo
+go run main.go -engine chi
 go run main.go -engine gin -addr :3000
 go run main.go -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 
@@ -67,24 +72,24 @@ vegeta report -type=hist < bench-results/gin.bin
 vegeta plot < bench-results/fiber.bin > new-plot.html
 ```
 
-`bench.sh` requires `vegeta` on `$PATH` (`go install github.com/tsenart/vegeta@latest`) and `curl` for its healthcheck poll. It builds the binary once, then for each engine: starts the server, waits for `/health`, warms up at 500 req/s for 3s, attacks at the configured rate/duration, generates a text report and HTML plot, kills the server. A `summary.txt` table and a `combined.html` (three plots side-by-side) are written at the end.
+`bench.sh` requires `vegeta` on `$PATH` (`go install github.com/tsenart/vegeta@latest`) and `curl` for its healthcheck poll. It builds the binary once, then for each of the five engines: starts the server, waits for `/health`, warms up at 500 req/s for 3s, attacks at the configured rate/duration (in two modes — single + cycled), generates text reports and HTML plots, kills the server. A `summary.txt` table (10 rows) and a `combined.html` (auto-fit grid of plots) are written at the end.
 
 There is no lint config or CI in the repo.
 
 ### Test layout
 
 - **[app/app_test.go](app/app_test.go)** — unit tests for `App.Health` / `App.Hello` / `App.GetTransaction`. `fakeTxRepo` is a controllable `TransactionRepository` used to drive 404 / 500 / success paths without a DB. The success case round-trips the response body through `json.Unmarshal` into a `Transaction` and compares with `reflect.DeepEqual` — catches missing fields, renames, or broken nesting in one assert.
-- **[server/stdlib/stdlib_test.go](server/stdlib/stdlib_test.go)** — internal-package test for `translatePath` (nested params, mid-segment colons, bare `:`) plus the integration suite.
+- **[server/internal/routeutil/routeutil_test.go](server/internal/routeutil/routeutil_test.go)** — table-driven test for `TranslateColonToBrace` (nested params, mid-segment colons, bare `:`).
 - **[server/internal/servertest/servertest.go](server/internal/servertest/servertest.go)** — shared HTTP integration suite. Registers a `/health` and `/hello/:name` on a given `server.Server`, starts it on a port the caller picks, hits it over real HTTP, then `Shutdown`s. Each adapter test calls `servertest.RunSuite(t, New(), ":1808X")` with a unique port so packages can run in parallel.
 - **[db/mysql/mysql_test.go](db/mysql/mysql_test.go)** — MySQL adapter integration test, gated by `//go:build integration`. Requires `docker compose up -d` (or another MySQL with the schema/seed). Run with `go test -tags integration ./db/mysql`. Default `go test ./...` skips it.
-- Adapter ports: stdlib `:18081`, gin `:18082`, fiber `:18083`. Bump these if your machine has them busy.
+- Adapter ports: stdlib `:18081`, gin `:18082`, fiber `:18083`, echo `:18084`, chi `:18085`. Bump these if your machine has them busy.
 
 ## Architecture
 
 The point of the project is the seams, not the handlers. Hexagonal: driving ports (HTTP) inbound on one side, driven ports (DB, ...) outbound on the other, application core in the middle. Keep that in mind when changing things:
 
 - **[server/server.go](server/server.go) is the inbound (driving) port.** Framework-agnostic `Request`/`Response` structs and a `HandlerFunc(ctx, Request) Response` signature. The `Server` interface is `RegisterRoute` + `Start` + `Shutdown`. The application core depends on this package — never on Gin/Fiber/net/http types.
-- **Each HTTP adapter is one file, one responsibility.** [server/stdlib/stdlib.go](server/stdlib/stdlib.go), [server/ginadapt/gin.go](server/ginadapt/gin.go), [server/fiberadapt/fiber.go](server/fiberadapt/fiber.go) wrap their framework and translate to/from the `server.Request`/`server.Response` shape. Handlers never see framework-specific context.
+- **Each HTTP adapter is one file, one responsibility.** [server/stdlib/stdlib.go](server/stdlib/stdlib.go), [server/ginadapt/gin.go](server/ginadapt/gin.go), [server/fiberadapt/fiber.go](server/fiberadapt/fiber.go), [server/echoadapt/echo.go](server/echoadapt/echo.go), [server/chiadapt/chi.go](server/chiadapt/chi.go) wrap their framework and translate to/from the `server.Request`/`server.Response` shape. Handlers never see framework-specific context.
 - **[app/app.go](app/app.go) is the application core.** The `App` struct holds outbound dependencies (driven ports — repositories, clients, ...) as interface fields. Its methods match the `server.HandlerFunc` signature so they can be registered directly on any `server.Server` adapter. When adding a new endpoint, add a method on `App`; when adding a new outbound dependency, add an interface field on `App` and an adapter package outside `app/`.
 - **[app/transactions.go](app/transactions.go) defines a driven port.** `TransactionRepository` is the contract; `Transaction` is the domain aggregate with nested `Customer` and `CartSnapshot`. Domain types carry **only `json:` tags** — they're infrastructure-free. `ErrTransactionNotFound` is the sentinel adapters must return for missing rows so the handler can translate to 404. New driven ports follow the same shape: interface + sentinels in `app/`, implementation in a sibling top-level package.
 - **[db/mysql/mysql.go](db/mysql/mysql.go) implements `TransactionRepository`** with sqlx + go-sql-driver/mysql. The JOIN query is held in `getTransactionByIDQuery`; results scan into an internal `transactionRow` DTO (flat, aliased columns, carries the `db:` tags), then `toDomain()` assembles `app.Transaction`. This keeps SQL-shape coupling inside `db/mysql/` instead of leaking into the domain. Pool tuned for the benchmark (`SetMaxOpenConns(100)`, `SetMaxIdleConns(50)`). Maps `sql.ErrNoRows` to `app.ErrTransactionNotFound`.
@@ -106,9 +111,9 @@ The endpoint `/v1/transaction/:id` runs `transaction ⋈ customer ⋈ cart_snaps
 ### Adapter quirks worth knowing
 
 - **Fiber uses fasthttp, not `net/http`.** Its request body buffer is reused across requests, so [server/fiberadapt/fiber.go](server/fiberadapt/fiber.go) must `copy()` `c.Body()` before handing it to the handler — otherwise concurrent requests race. Do not "optimize" that copy away.
-- **stdlib uses Go 1.22+ pattern routing**, which expects `{name}` wildcards — *not* `:name` (Gin/Fiber's convention). The adapter normalises by translating `:name` → `{name}` in `translatePath` ([server/stdlib/stdlib.go](server/stdlib/stdlib.go)) at register-time, then pulls values via `r.PathValue(...)` into `server.Request.Params`. The route string in [main.go](main.go) stays in `:name` form so all three adapters share it. If you add another adapter using a different param syntax, follow the same pattern: keep the canonical form `:name` and translate inside the adapter.
-- **Shutdown is not symmetric.** stdlib and Gin call `http.Server.Shutdown(ctx)`. Fiber's `app.Shutdown()` ignores the context entirely ([server/fiberadapt/fiber.go:62](server/fiberadapt/fiber.go#L62)).
-- **Gin runs in release mode** (`gin.SetMode(gin.ReleaseMode)` in `New()`), so debug logging is suppressed during benchmarks.
+- **Path-param translation is shared.** Routes are declared canonically in `:name` form (Gin/Fiber/Echo's convention). stdlib and chi expect `{name}` — both translate at register-time via [`server/internal/routeutil.TranslateColonToBrace`](server/internal/routeutil/routeutil.go) and then read values via their respective APIs (`r.PathValue(...)` for stdlib, `chi.URLParam(r, ...)` for chi). If you add another `{name}`-style adapter, call routeutil; if it's `:name`-style, pass the path through unchanged.
+- **Shutdown is not symmetric.** stdlib, Gin, Echo, and chi all wrap an `http.Server` and call `Shutdown(ctx)` cleanly. Fiber's `app.Shutdown()` ignores the context entirely ([server/fiberadapt/fiber.go:62](server/fiberadapt/fiber.go#L62)).
+- **Noise suppression for benchmarks.** Gin uses `gin.SetMode(gin.ReleaseMode)`; Echo sets `HideBanner = true` and `HidePort = true`. stdlib/chi/fiber are quiet by default.
 
 ### Benchmark methodology
 
@@ -119,4 +124,4 @@ The endpoint `/v1/transaction/:id` runs `transaction ⋈ customer ⋈ cart_snaps
 
 Each mode does its own 3s/500 req/s warmup before measurement. The warmup uses the *same source* as the attack (single → SINGLE_TARGET, cycled → targets file), so the Go runtime and any per-target setup costs are paid before the measurement starts. The warmup exists because earlier runs had visibly skewed first-engine results.
 
-Results files: `bench-results/<engine>-<mode>.{bin,txt,html}` (6 trios), plus `summary.txt` (6-row table) and `combined.html` (3 columns × 2 modes grid). The `targets-cycled.txt` file (~12 MB) is regenerated each run.
+Results files: `bench-results/<engine>-<mode>.{bin,txt,html}` (5 engines × 2 modes = 10 trios), plus `summary.txt` (10-row table) and `combined.html` (auto-fit grid of all plots). The `targets-cycled.txt` file (~12 MB) is regenerated each run.

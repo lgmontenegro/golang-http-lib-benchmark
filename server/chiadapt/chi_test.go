@@ -1,4 +1,4 @@
-package stdlib
+package chiadapt
 
 import (
 	"testing"
@@ -7,5 +7,5 @@ import (
 )
 
 func TestIntegration(t *testing.T) {
-	servertest.RunSuite(t, New(), ":18081")
+	servertest.RunSuite(t, New(), ":18085")
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench.sh — benchmark comparativo: stdlib vs gin vs fiber
+# bench.sh — benchmark comparativo: stdlib vs gin vs fiber vs echo vs chi
 # Requisitos: go, vegeta (go install github.com/tsenart/vegeta@latest), docker
 # Uso: ./bench.sh [rate] [duration]
 #   rate     — requisições por segundo (default: 5000)
@@ -11,7 +11,7 @@ RATE="${1:-5000}"
 DURATION="${2:-30s}"
 ADDR=":8080"
 RESULTS_DIR="bench-results"
-ENGINES=("stdlib" "gin" "fiber")
+ENGINES=("stdlib" "gin" "fiber" "echo" "chi")
 # Two attack modes, run back-to-back per engine:
 #   single — same row every request → InnoDB buffer-pool hit, measures
 #            framework + sqlx + driver + MySQL hot path.
@@ -169,11 +169,11 @@ run_engine() {
 generate_cycled_targets
 
 echo ""
-echo "╔═══════════════════════════════════════════╗"
-echo "║  Benchmark: stdlib vs gin vs fiber        ║"
-echo "║  Rate: $RATE req/s | Duration: $DURATION          ║"
-echo "║  Modes: single (hot row) + cycled (${CYCLED_COUNT} ids)  ║"
-echo "╚═══════════════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════════════╗"
+echo "║  Benchmark: stdlib vs gin vs fiber vs echo vs chi ║"
+echo "║  Rate: $RATE req/s | Duration: $DURATION                  ║"
+echo "║  Modes: single (hot row) + cycled (${CYCLED_COUNT} ids)          ║"
+echo "╚═══════════════════════════════════════════════════╝"
 echo ""
 
 for engine in "${ENGINES[@]}"; do
@@ -233,8 +233,7 @@ cat > "$COMBINED_PLOT" <<'HTMLHEAD'
   h2 { color: #0f3460; background: #16213e; padding: 0.5rem 1rem; border-radius: 4px; color: #e0e0e0; }
   h3 { color: #aaa; margin: 0.25rem 0; font-size: 0.85rem; font-weight: normal; }
   iframe { width: 100%; height: 360px; border: 1px solid #333; border-radius: 4px; margin-bottom: 1rem; }
-  .grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
-  @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr 1fr; } }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
 </style>
 </head>
 <body>

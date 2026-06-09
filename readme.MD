@@ -7,10 +7,10 @@
 ## English
 
 A proof of concept demonstrating dependency inversion in Go to swap between
-three HTTP frameworks (stdlib, Gin, Fiber) and compare their performance under
-steady load with vegeta. The benchmark target queries MySQL (joining three
-tables via sqlx) so the measurement covers the full path: framework + sqlx +
-driver + MySQL.
+five HTTP frameworks (stdlib, Gin, Fiber, Echo, chi) and compare their
+performance under steady load with vegeta. The benchmark target queries
+MySQL (joining three tables via sqlx) so the measurement covers the full
+path: framework + sqlx + driver + MySQL.
 
 ### Table of contents
 
@@ -51,7 +51,9 @@ go-http-di/
 │   ├── server.go                 # Driving port: Server interface + Request/Response types
 │   ├── stdlib/stdlib.go          # net/http adapter
 │   ├── ginadapt/gin.go           # Gin adapter
-│   └── fiberadapt/fiber.go       # Fiber adapter
+│   ├── fiberadapt/fiber.go       # Fiber adapter
+│   ├── echoadapt/echo.go         # Echo adapter
+│   └── chiadapt/chi.go           # chi adapter
 ├── db/
 │   └── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
 ├── mysql-init/
@@ -119,11 +121,11 @@ schema/seed: `docker compose down && rm -rf mysql-data && docker compose up
 # stdlib (default), connects to MySQL on the default DSN
 go run main.go
 
-# Gin
+# Gin / Fiber / Echo / chi
 go run main.go -engine gin
-
-# Fiber
 go run main.go -engine fiber
+go run main.go -engine echo
+go run main.go -engine chi
 
 # Custom port + custom DSN (also reads the DB_DSN env var)
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
@@ -152,9 +154,11 @@ Coverage:
   default), and `GetTransaction` (200/404/500 via `fakeTxRepo`);
   `server/stdlib` validates the `:name` → `{name}` translation.
 - **HTTP integration** — a shared suite in `server/internal/servertest`
-  registers routes, starts each adapter on dedicated ports (`:18081/2/3`),
-  makes real HTTP calls, and verifies `/health`, `/hello/:name`, and 404.
-  Each adapter has a minimal `_test.go` that invokes the suite.
+  registers routes, starts each adapter on dedicated ports
+  (stdlib `:18081`, gin `:18082`, fiber `:18083`, echo `:18084`, chi
+  `:18085`), makes real HTTP calls, and verifies `/health`,
+  `/hello/:name`, and 404. Each adapter has a minimal `_test.go` that
+  invokes the suite.
 - **MySQL integration** — `db/mysql/mysql_test.go` is gated by the
   `integration` build tag (needs the container UP). Excluded from the default
   `go test ./...`.
@@ -194,11 +198,12 @@ Full flow:
    first boot because of the seed).
 3. Builds the binary once (`go build`).
 4. Generates the cycled targets file (150k lines, ~12 MB).
-5. For each engine: starts the server, waits for the healthcheck, runs both
-   modes (single, cycled), stops the server.
-6. Produces a text report + HTML plot per (engine, mode) — 6 reports total.
-7. Prints the 6-row comparative table and writes `summary.txt` +
-   `combined.html` (3 cols × 2 modes).
+5. For each of the five engines: starts the server, waits for the
+   healthcheck, runs both modes (single, cycled), stops the server.
+6. Produces a text report + HTML plot per (engine, mode) — 10 reports
+   total (5 × 2).
+7. Prints the 10-row comparative table and writes `summary.txt` +
+   `combined.html` (auto-fit grid of all plots).
 8. `trap` on `EXIT` runs `docker compose down` even on error / Ctrl+C.
 
 ### Analyze results
@@ -220,8 +225,8 @@ vegeta report -type=json < bench-results/fiber-single.bin
 vegeta plot < bench-results/stdlib-cycled.bin > new-plot.html
 ```
 
-The combined report (`bench-results/combined.html`) shows all six plots in
-the browser (3 engines × 2 modes).
+The combined report (`bench-results/combined.html`) shows all ten plots
+in the browser (5 engines × 2 modes), auto-fit grid.
 
 ### Relevant metrics
 
@@ -244,29 +249,36 @@ macOS arm64, 5000 req/s × 30s, two modes per engine (run back-to-back):
 
 | Engine  | Mode    | Throughput | p50         | p95         | p99           | Success |
 |---------|---------|------------|-------------|-------------|---------------|---------|
-| stdlib  | single  | 5000.0/s   | 422.3µs     | 508.1µs     | 651.8µs       | 100.00% |
-| stdlib  | cycled  | 5000.0/s   | 420.2µs     | 516.3µs     | 706.0µs       | 100.00% |
-| gin     | single  | 5000.0/s   | 417.6µs     | 507.1µs     | 717.2µs       | 100.00% |
-| gin     | cycled  | 5000.0/s   | 413.8µs     | 521.4µs     | **4.58ms** ⚠  | 100.00% |
-| fiber   | single  | 5000.0/s   | **353.6µs** | **431.3µs** | **605.7µs**   | 100.00% |
-| fiber   | cycled  | 5000.0/s   | 356.0µs     | 432.2µs     | 598.5µs       | 100.00% |
+| stdlib  | single  | 5000.0/s   | 421.4µs     | 513.5µs     | 723.3µs       | 100.00% |
+| stdlib  | cycled  | 5000.0/s   | 420.4µs     | 516.4µs     | 704.2µs       | 100.00% |
+| gin     | single  | 5000.0/s   | 423.1µs     | 514.8µs     | 701.8µs       | 100.00% |
+| gin     | cycled  | 5000.0/s   | 409.6µs     | 498.8µs     | 691.5µs       | 100.00% |
+| fiber   | single  | 5000.0/s   | **353.2µs** | **426.2µs** | **584.6µs**   | 100.00% |
+| fiber   | cycled  | 5000.0/s   | 354.6µs     | 427.5µs     | 596.9µs       | 100.00% |
+| echo    | single  | 5000.0/s   | 392.6µs     | 475.3µs     | 666.8µs       | 100.00% |
+| echo    | cycled  | 5000.0/s   | 395.5µs     | 477.9µs     | 640.5µs       | 100.00% |
+| chi     | single  | 5000.0/s   | 394.3µs     | 490.8µs     | **2.98ms** ⚠  | 100.00% |
+| chi     | cycled  | 5000.0/s   | 397.7µs     | 479.8µs     | 665.2µs       | 100.00% |
 
 Reading:
 
-- **Throughput** — all three sustain 5000 req/s at 100% success. None is
-  saturated here; push the rate higher to find their limits
-  (`./bench.sh 20000 30s` etc.).
-- **Fiber leads** consistently on latency (~17% better p50 vs stdlib/gin),
-  same pattern as the no-DB baseline.
-- **`single` vs `cycled` is essentially identical** in stdlib and fiber —
-  confirms the working set (~15 MB live data) fits in InnoDB's default 128 MB
-  buffer pool. JOIN cost is dominated by planner + index walk, not disk.
-- **Gin `cycled` p99 outlier (4.58 ms)** — ~6× the median and ~9× what Gin
-  does in `single`. Isolated against the other 9 cells; likely a GC pause or
-  brief contention. Worth a re-run to confirm whether it's repeatable.
+- **Throughput** — all ten cells sustain 5000 req/s at 100% success. None is
+  saturated here; push the rate higher (`./bench.sh 20000 30s`) to find each
+  engine's ceiling.
+- **Three p50 tiers emerge**:
+  1. **Fiber (~354 µs)** — clear winner, ~10% better than the next group.
+  2. **Echo / chi (~393–398 µs)** — middle tier, essentially tied.
+  3. **stdlib / gin (~420 µs)** — slowest, also tied within noise.
+- **`single` vs `cycled` is essentially identical** across all five engines —
+  confirms the working set (~15 MB) fits InnoDB's default 128 MB buffer pool.
+  Index-walk cost is negligible relative to the JOIN planner + round-trip.
+- **chi `single` p99 outlier (2.98 ms)** — ~8× the median, isolated against
+  the other 9 cells. Last run had the same signature on Gin (`cycled`,
+  4.58 ms) that **did not repeat** this run — so likely a GC pause or brief
+  contention, not engine-specific. Worth one more pass to confirm.
 - **Compared to the baseline** (next section), JOIN + sqlx + MySQL adds
-  ~380 µs of p50 — DB+driver now account for most of the latency, not
-  framework.
+  ~310–390 µs of constant p50 — DB+driver account for ~90% of today's
+  latency, framework ≤10%.
 
 #### Previous baseline — static `/health` (reference)
 
@@ -279,9 +291,11 @@ chain):
 | gin    | 5000.02/s  | 39.4µs   | 66.9µs   | 124.7µs   | 100.00% |
 | fiber  | 5000.04/s  | 32.0µs   | 57.7µs   | 93.7µs    | 100.00% |
 
-The baseline isolates pure framework cost. Comparing row by row to the
-current run: p50 grows ~10× (~40 µs → ~400 µs), confirming ~90% of today's
-latency is DB + driver and ~10% framework. Engine ordering holds.
+The baseline isolates pure framework cost (no DB in the chain). It only
+covers three engines because Echo and chi were added later. For the three
+shared engines, the ordering holds — Fiber fastest, stdlib/gin tied second.
+The DB-bound run grows p50 ~10× (~40 µs → ~400 µs), confirming ~90% of
+today's latency is DB + driver and ~10% framework.
 
 ### Notes
 
@@ -314,10 +328,10 @@ latency is DB + driver and ~10% framework. Engine ordering holds.
 ## Português
 
 Prova de conceito que demonstra inversão de dependência em Go para trocar
-entre três frameworks HTTP (stdlib, Gin, Fiber) e comparar as suas
-performances sob carga constante com vegeta. O target do benchmark consulta
-MySQL (JOIN de três tabelas via sqlx), por isso a medição cobre o caminho
-completo: framework + sqlx + driver + MySQL.
+entre cinco frameworks HTTP (stdlib, Gin, Fiber, Echo, chi) e comparar as
+suas performances sob carga constante com vegeta. O target do benchmark
+consulta MySQL (JOIN de três tabelas via sqlx), por isso a medição cobre o
+caminho completo: framework + sqlx + driver + MySQL.
 
 ### Índice
 
@@ -358,7 +372,9 @@ go-http-di/
 │   ├── server.go                 # Driving port: interface Server + tipos Request/Response
 │   ├── stdlib/stdlib.go          # Adapter net/http
 │   ├── ginadapt/gin.go           # Adapter Gin
-│   └── fiberadapt/fiber.go       # Adapter Fiber
+│   ├── fiberadapt/fiber.go       # Adapter Fiber
+│   ├── echoadapt/echo.go         # Adapter Echo
+│   └── chiadapt/chi.go           # Adapter chi
 ├── db/
 │   └── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
 ├── mysql-init/
@@ -426,11 +442,11 @@ compose up -d`.
 # stdlib (default), conecta a MySQL no DSN default
 go run main.go
 
-# Gin
+# Gin / Fiber / Echo / chi
 go run main.go -engine gin
-
-# Fiber
 go run main.go -engine fiber
+go run main.go -engine echo
+go run main.go -engine chi
 
 # Porta custom + DSN custom (também aceita env DB_DSN)
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
@@ -459,9 +475,10 @@ Cobertura:
   e `GetTransaction` (200/404/500 com `fakeTxRepo`); `server/stdlib` valida a
   tradução de `:name` → `{name}`.
 - **Integração HTTP** — uma suite partilhada em `server/internal/servertest`
-  regista rotas, sobe cada adapter em portos dedicados (`:18081/2/3`), faz HTTP
-  real e verifica `/health`, `/hello/:name` e 404. Cada adapter tem um
-  `_test.go` mínimo que invoca a suite.
+  regista rotas, sobe cada adapter em portos dedicados (stdlib `:18081`,
+  gin `:18082`, fiber `:18083`, echo `:18084`, chi `:18085`), faz HTTP real
+  e verifica `/health`, `/hello/:name` e 404. Cada adapter tem um `_test.go`
+  mínimo que invoca a suite.
 - **Integração MySQL** — `db/mysql/mysql_test.go` está atrás da build tag
   `integration` (precisa do container UP). Excluído de `go test ./...` por
   default.
@@ -502,11 +519,12 @@ Fluxo completo:
    primeiro boot por causa do seed).
 3. Compila o binário uma vez (`go build`).
 4. Gera o ficheiro de targets ciclados (150k linhas, ~12 MB).
-5. Para cada engine: inicia o servidor, espera o healthcheck, corre os
-   dois modos (single, cycled), pára o servidor.
-6. Gera relatório texto + plot HTML por (engine, mode) — 6 relatórios.
-7. Imprime a tabela comparativa de 6 linhas e regista `summary.txt` +
-   `combined.html` (3 cols × 2 modes).
+5. Para cada um dos cinco engines: inicia o servidor, espera o
+   healthcheck, corre os dois modos (single, cycled), pára o servidor.
+6. Gera relatório texto + plot HTML por (engine, mode) — 10 relatórios
+   no total (5 × 2).
+7. Imprime a tabela comparativa de 10 linhas e regista `summary.txt` +
+   `combined.html` (grid auto-fit com todos os plots).
 8. `trap` no `EXIT` faz `docker compose down` mesmo em erro / Ctrl+C.
 
 ### Analisar resultados
@@ -528,8 +546,8 @@ vegeta report -type=json < bench-results/fiber-single.bin
 vegeta plot < bench-results/stdlib-cycled.bin > novo-plot.html
 ```
 
-O relatório combinado (`bench-results/combined.html`) mostra os seis plots
-no browser (3 engines × 2 modes).
+O relatório combinado (`bench-results/combined.html`) mostra os dez plots
+no browser (5 engines × 2 modes), em grid auto-fit.
 
 ### Métricas relevantes
 
@@ -552,31 +570,39 @@ macOS arm64, 5000 req/s × 30s, dois modos por engine (executados back-to-back):
 
 | Engine  | Mode    | Throughput | p50         | p95         | p99           | Success |
 |---------|---------|------------|-------------|-------------|---------------|---------|
-| stdlib  | single  | 5000.0/s   | 422.3µs     | 508.1µs     | 651.8µs       | 100.00% |
-| stdlib  | cycled  | 5000.0/s   | 420.2µs     | 516.3µs     | 706.0µs       | 100.00% |
-| gin     | single  | 5000.0/s   | 417.6µs     | 507.1µs     | 717.2µs       | 100.00% |
-| gin     | cycled  | 5000.0/s   | 413.8µs     | 521.4µs     | **4.58ms** ⚠  | 100.00% |
-| fiber   | single  | 5000.0/s   | **353.6µs** | **431.3µs** | **605.7µs**   | 100.00% |
-| fiber   | cycled  | 5000.0/s   | 356.0µs     | 432.2µs     | 598.5µs       | 100.00% |
+| stdlib  | single  | 5000.0/s   | 421.4µs     | 513.5µs     | 723.3µs       | 100.00% |
+| stdlib  | cycled  | 5000.0/s   | 420.4µs     | 516.4µs     | 704.2µs       | 100.00% |
+| gin     | single  | 5000.0/s   | 423.1µs     | 514.8µs     | 701.8µs       | 100.00% |
+| gin     | cycled  | 5000.0/s   | 409.6µs     | 498.8µs     | 691.5µs       | 100.00% |
+| fiber   | single  | 5000.0/s   | **353.2µs** | **426.2µs** | **584.6µs**   | 100.00% |
+| fiber   | cycled  | 5000.0/s   | 354.6µs     | 427.5µs     | 596.9µs       | 100.00% |
+| echo    | single  | 5000.0/s   | 392.6µs     | 475.3µs     | 666.8µs       | 100.00% |
+| echo    | cycled  | 5000.0/s   | 395.5µs     | 477.9µs     | 640.5µs       | 100.00% |
+| chi     | single  | 5000.0/s   | 394.3µs     | 490.8µs     | **2.98ms** ⚠  | 100.00% |
+| chi     | cycled  | 5000.0/s   | 397.7µs     | 479.8µs     | 665.2µs       | 100.00% |
 
 Leituras:
 
-- **Throughput** — os três aguentam 5000 req/s com 100% sucesso. Ninguém
-  satura aqui; é preciso subir a taxa para distinguir limites máximos
-  (`./bench.sh 20000 30s`, etc.).
-- **Fiber lidera** consistentemente em latência (~17% melhor p50 vs stdlib/gin),
-  mesmo padrão da baseline sem DB.
-- **`single` vs `cycled` é praticamente igual** em stdlib e fiber — confirma
-  que o working set (~15 MB de dados ativos) cabe no buffer pool default do
-  InnoDB (128 MB). O custo do JOIN é dominado pelo planner + index walk, não
-  por disco.
-- **Outlier do Gin em `cycled` p99 (4.58 ms)** — ~6× a média e ~9× o que o Gin
-  faz em `single`. Valor isolado dos 9 cells restantes; provavelmente uma
-  pausa de GC ou contention pontual. Vale uma re-execução para confirmar se é
-  repetível.
+- **Throughput** — todas as dez células aguentam 5000 req/s com 100% sucesso.
+  Ninguém satura aqui; sobe a taxa (`./bench.sh 20000 30s`) para encontrar o
+  tecto de cada um.
+- **Três grupos de p50**:
+  1. **Fiber (~354 µs)** — vencedor claro, ~10% melhor que o grupo seguinte.
+  2. **Echo / chi (~393–398 µs)** — meio do pelotão, praticamente empatados.
+  3. **stdlib / gin (~420 µs)** — os mais lentos, também empatados dentro
+     do ruído.
+- **`single` vs `cycled` é praticamente idêntico** nos cinco engines —
+  confirma que o working set (~15 MB) cabe no buffer pool default do InnoDB
+  (128 MB). Custo de index walk é negligível face ao planner do JOIN +
+  round-trip.
+- **Outlier do chi em `single` p99 (2.98 ms)** — ~8× a mediana, isolado dos
+  outros 9 cells. A corrida anterior tinha a mesma assinatura no Gin
+  (`cycled`, 4.58 ms) e **não se repetiu** desta vez — portanto é
+  provavelmente uma pausa de GC ou contention pontual, não específico do
+  engine. Vale uma nova execução para confirmar.
 - **Comparado à baseline** (próxima secção), JOIN + sqlx + MySQL adiciona
-  ~380 µs de p50 — a maior parte da latência agora é o caminho até à DB,
-  não framework.
+  ~310–390 µs de p50 constantes — DB+driver representam ~90% da latência
+  hoje, framework ≤10%.
 
 #### Baseline anterior — `/health` estático (referência)
 
@@ -589,10 +615,12 @@ hardcoded, sem MySQL na cadeia):
 | gin    | 5000.02/s  | 39.4µs   | 66.9µs   | 124.7µs   | 100.00% |
 | fiber  | 5000.04/s  | 32.0µs   | 57.7µs   | 93.7µs    | 100.00% |
 
-A baseline servia para isolar o custo puro de framework. Comparando linha a
-linha com a corrida actual: p50 cresce ~10× (~40 µs → ~400 µs), confirmando
-que ~90% da latência hoje é DB + driver e ~10% framework. A ordem entre
-engines mantém-se.
+A baseline isola o custo puro de framework (sem DB no caminho). Cobre só
+três engines porque o Echo e o chi foram adicionados mais tarde. Para os
+três engines partilhados, a ordem mantém-se — Fiber à frente, stdlib/gin
+empatados em segundo. A corrida com DB cresce o p50 ~10× (~40 µs →
+~400 µs), confirmando que ~90% da latência hoje é DB + driver e ~10%
+framework.
 
 ### Notas
 
