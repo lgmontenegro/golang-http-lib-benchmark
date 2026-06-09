@@ -65,7 +65,8 @@ go-http-di/
 ├── proto/
 │   ├── transactions.proto        # gRPC wire schema
 │   └── transactionspb/           # generated Go stubs (committed)
-├── bench.sh                      # Comparative benchmark script
+├── bench.sh                      # Engine comparison (5 engines × 2 modes, mysql repo only)
+├── bench-full.sh                 # Full matrix (5 engines × 3 backends × 2 modes)
 ├── docker-compose.yml            # MySQL 8.0 with bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -214,18 +215,34 @@ Coverage:
 
 ### Run the benchmark
 
+Two scripts answer two different questions:
+
+- **[`bench.sh`](bench.sh)** — *Q1: which framework is fastest?* Holds
+  `-repo mysql` (in-process). Varies engine × mode (5 × 2 = 10 cells).
+  ~5 min. Use this for quick iteration.
+- **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 together*: how does
+  each framework behave under each backend protocol? Full matrix
+  engine × backend × mode (5 × 3 × 2 = 30 cells). ~17 min. Output is
+  grouped per engine — 5 sub-tables of 6 rows each, so you can read
+  "for engine X, mysql vs rest vs grpc" directly. Writes to
+  `bench-results-full/`. Auto-starts `cmd/dataservice` and tears it
+  down on EXIT.
+
 ```bash
-chmod +x bench.sh
+chmod +x bench.sh bench-full.sh
 
-# Default: 5000 req/s for 30s per engine
+# Engine comparison (default: 5000 req/s for 30s per engine)
 ./bench.sh
+./bench.sh 10000 60s            # custom rate + duration
 
-# Custom: 10000 req/s for 60s
-./bench.sh 10000 60s
+# Full matrix (engine × backend × mode)
+./bench-full.sh
+./bench-full.sh 10000 60s
 ```
 
-The script runs **two attack modes per engine**, back-to-back (without
-restarting the server between them):
+Both scripts run **two attack modes** (per engine in bench.sh, per
+engine×backend in bench-full.sh), back-to-back without restarting the
+server between modes:
 
 - **`single`** — every request hits the same row (`…000000000001`). InnoDB
   pins it in the buffer pool → measures the hot path: framework + sqlx +
@@ -444,7 +461,8 @@ go-http-di/
 ├── proto/
 │   ├── transactions.proto        # Schema gRPC
 │   └── transactionspb/           # Stubs Go gerados (commitados)
-├── bench.sh                      # Script de benchmark comparativo
+├── bench.sh                      # Comparação de engines (5 × 2 modos, só -repo mysql)
+├── bench-full.sh                 # Matriz cheia (5 engines × 3 backends × 2 modos)
 ├── docker-compose.yml            # MySQL 8.0 com bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -592,18 +610,33 @@ Cobertura:
 
 ### Executar o benchmark
 
+Dois scripts respondem a perguntas diferentes:
+
+- **[`bench.sh`](bench.sh)** — *Q1: qual framework é mais rápido?*
+  Mantém `-repo mysql` (in-process). Varia engine × modo (5 × 2 = 10
+  cells). ~5 min. Bom para iteração rápida.
+- **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 em conjunto*: como é
+  que cada framework se comporta sob cada backend? Matriz cheia
+  engine × backend × modo (5 × 3 × 2 = 30 cells). ~17 min. Output
+  agrupado por engine — 5 sub-tabelas de 6 linhas cada, para ler
+  directamente "engine X: mysql vs rest vs grpc". Escreve para
+  `bench-results-full/`. Auto-arranca o `cmd/dataservice` e
+  derruba-o no EXIT.
+
 ```bash
-chmod +x bench.sh
+chmod +x bench.sh bench-full.sh
 
-# Default: 5000 req/s durante 30s por engine
+# Comparação de engines (default: 5000 req/s durante 30s por engine)
 ./bench.sh
+./bench.sh 10000 60s            # rate + duração custom
 
-# Custom: 10000 req/s durante 60s
-./bench.sh 10000 60s
+# Matriz cheia (engine × backend × modo)
+./bench-full.sh
+./bench-full.sh 10000 60s
 ```
 
-O script corre **dois modos por engine**, back-to-back (sem reiniciar o
-servidor entre eles):
+Ambos correm **dois modos** (por engine no bench.sh, por engine×backend
+no bench-full.sh), back-to-back sem reiniciar o servidor entre modos:
 
 - **`single`** — todos os pedidos batem na mesma row
   (`…000000000001`). InnoDB mantém-a no buffer pool → mede o caminho

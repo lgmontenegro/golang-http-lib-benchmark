@@ -50,6 +50,7 @@ func run() error {
 
 	// REST
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", healthHandler)
 	mux.HandleFunc("GET /v1/transaction/{id}", makeGetTransactionHandler(repo))
 	restSrv := &http.Server{Addr: *restAddr, Handler: mux}
 

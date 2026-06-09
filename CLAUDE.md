@@ -39,7 +39,8 @@ db/grpcclient/grpcclient.go          # gRPC client adapter (front → dataservic
 docker-compose.yml                   # MySQL 8.0, bind-mounted data + init scripts
 mysql-init/01-schema.sql             # DDL only — runs once on first init
 mysql-init/02-seed.sql               # bulk seed via recursive CTE (50k/150k/150k rows)
-bench.sh                             # vegeta-based comparative benchmark
+bench.sh                             # engine comparison: 5 engines × 2 modes (mysql repo only)
+bench-full.sh                        # full matrix: 5 engines × 3 backends × 2 modes
 ```
 
 Module path: `example.com/httpdi`.
@@ -90,8 +91,15 @@ go test -run TestTranslatePath ./server/stdlib   # one test
 # Full comparative benchmark (default: 5000 req/s for 30s per engine)
 # Brings MySQL up/down automatically via trap.
 chmod +x bench.sh
-./bench.sh
+./bench.sh                     # 5 engines × 2 modes (~5 min, mysql repo only)
 ./bench.sh 10000 60s           # custom rate + duration
+
+# Full matrix benchmark — adds the -repo dimension (mysql/rest/grpc).
+# Auto-starts the dataservice in the background; same trap cleans up.
+# Writes to bench-results-full/ (separate from bench.sh's output).
+chmod +x bench-full.sh
+./bench-full.sh                # 5 × 3 × 2 = 30 cells (~17 min)
+./bench-full.sh 10000 60s      # custom rate + duration
 
 # Re-analyze a recorded run without rerunning
 vegeta report < bench-results/stdlib.bin
@@ -151,7 +159,12 @@ The endpoint `/v1/transaction/:id` runs `transaction ⋈ customer ⋈ cart_snaps
 
 ### Benchmark methodology
 
-`bench.sh` runs **two attack modes per engine**, back-to-back without restarting the server:
+Two scripts answer two different questions:
+
+- **[bench.sh](bench.sh)** — *Q1: which framework is fastest?* Holds `-repo mysql` (in-process). Varies engine × mode (5 × 2 = 10 cells). ~5 min. Use this for quick iteration.
+- **[bench-full.sh](bench-full.sh)** — *Q1 + Q2 together: how does each framework behave under each backend protocol?* Full matrix engine × backend × mode (5 × 3 × 2 = 30 cells). ~17 min. Output is grouped per engine — 5 sub-tables of 6 rows each, so you can read "for engine X, mysql vs rest vs grpc" directly. Writes to `bench-results-full/` (separate dir; the targets file is regenerated). bench-full also spins up `cmd/dataservice` in the background and tears it down on EXIT.
+
+Both scripts run **two attack modes per engine** (or per engine×backend in bench-full), back-to-back without restarting the server:
 
 - **`single`** — every request hits the same row (`…000000000001`). The row stays pinned in the InnoDB buffer pool → measures framework + sqlx + driver + MySQL hot path with zero cache variance.
 - **`cycled`** — `vegeta attack -targets=bench-results/targets-cycled.txt -lazy` cycles through `CYCLED_COUNT` (150 000) distinct seeded transaction IDs. Exercises the PK index + JOIN paths across the dataset. The working set still fits in the default 128 MB buffer pool, so it's mostly cache hits after the first pass — what differs from `single` is mostly index-walk cost and `JOIN` planner work, not disk I/O.
