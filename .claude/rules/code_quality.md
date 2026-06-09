@@ -1,7 +1,7 @@
 # .claude/rules/code-quality.md
-- Todo o código novo precisa de testes
-- Funções públicas precisam de docblock
-- Usar Effective Go - [Effective Go](https://go.dev/doc/effective_go) - como regra do lint do codigo em Go
-- Usar Go Proverbs - [Go Proverbs](https://go-proverbs.github.io/) - como regra para logica do codigo go
-- Usar Clean Code
+- All new code requires tests
+- Public functions require a docblock
+- Follow [Effective Go](https://go.dev/doc/effective_go) as the lint rule for Go code
+- Follow [Go Proverbs](https://go-proverbs.github.io/) as the rule for Go code logic
+- Apply Clean Code
 - YAGNI
