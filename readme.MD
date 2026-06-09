@@ -8,9 +8,20 @@
 
 A proof of concept demonstrating dependency inversion in Go to swap between
 five HTTP frameworks (stdlib, Gin, Fiber, Echo, chi) and compare their
-performance under steady load with vegeta. The benchmark target queries
-MySQL (joining three tables via sqlx) so the measurement covers the full
-path: framework + sqlx + driver + MySQL.
+performance under steady load with vegeta.
+
+The front service can resolve the transaction aggregate in two ways
+selected by the `-repo` flag:
+
+- **`mysql`** *(default)* — in-process: front talks to MySQL directly via
+  sqlx.
+- **`rest`** — over the network: front delegates to a separate
+  **dataservice** (`cmd/dataservice`) over HTTP+JSON. The dataservice owns
+  the MySQL connection.
+
+Same shape, same JSON, same `app.TransactionRepository` interface — only
+the adapter differs. The benchmark covers the full path: framework + (sqlx
+or REST hop) + MySQL.
 
 ### Table of contents
 
@@ -41,7 +52,12 @@ go install github.com/tsenart/vegeta@latest
 
 ```
 go-http-di/
-├── main.go                       # Composition root (wiring only)
+├── main.go                       # Front service: composition root, -engine + -repo
+├── cmd/
+│   └── dataservice/              # Data service: owns MySQL, exposes REST
+│       ├── main.go
+│       ├── handler.go
+│       └── handler_test.go
 ├── bench.sh                      # Comparative benchmark script
 ├── docker-compose.yml            # MySQL 8.0 with bind mount
 ├── app/
@@ -55,7 +71,8 @@ go-http-di/
 │   ├── echoadapt/echo.go         # Echo adapter
 │   └── chiadapt/chi.go           # chi adapter
 ├── db/
-│   └── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
+│   ├── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
+│   └── restclient/restclient.go  # REST client adapter (front → dataservice)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL for the 3 tables; runs only on first boot
 │   └── 02-seed.sql               # Bulk seed via recursive CTE (50k/150k/150k)
@@ -117,6 +134,8 @@ schema/seed: `docker compose down && rm -rf mysql-data && docker compose up
 
 ### Run the server manually
 
+**In-process MySQL** (default: front talks to MySQL directly):
+
 ```bash
 # stdlib (default), connects to MySQL on the default DSN
 go run main.go
@@ -131,7 +150,17 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-Smoke test:
+**REST microservice** (front delegates to the dataservice; two terminals):
+
+```bash
+# Terminal A: data tier (owns MySQL, REST on :9090)
+go run ./cmd/dataservice -addr :9090
+
+# Terminal B: front (any engine, talks to the dataservice)
+go run main.go -engine fiber -repo rest -repo-addr http://localhost:9090
+```
+
+Smoke test (same regardless of `-repo`):
 
 ```bash
 curl http://localhost:8080/health
@@ -329,9 +358,20 @@ today's latency is DB + driver and ~10% framework.
 
 Prova de conceito que demonstra inversão de dependência em Go para trocar
 entre cinco frameworks HTTP (stdlib, Gin, Fiber, Echo, chi) e comparar as
-suas performances sob carga constante com vegeta. O target do benchmark
-consulta MySQL (JOIN de três tabelas via sqlx), por isso a medição cobre o
-caminho completo: framework + sqlx + driver + MySQL.
+suas performances sob carga constante com vegeta.
+
+O serviço front pode resolver o agregado de duas formas, selecionadas
+pela flag `-repo`:
+
+- **`mysql`** *(default)* — in-process: o front fala com o MySQL
+  directamente via sqlx.
+- **`rest`** — sobre a rede: o front delega num **dataservice** separado
+  (`cmd/dataservice`) por HTTP+JSON. O dataservice é o dono da ligação ao
+  MySQL.
+
+Mesmo shape, mesmo JSON, mesma interface `app.TransactionRepository` —
+só muda o adapter. O benchmark cobre o caminho completo: framework +
+(sqlx ou hop REST) + MySQL.
 
 ### Índice
 
@@ -362,7 +402,12 @@ go install github.com/tsenart/vegeta@latest
 
 ```
 go-http-di/
-├── main.go                       # Composition root (apenas wiring)
+├── main.go                       # Serviço front: composition root, -engine + -repo
+├── cmd/
+│   └── dataservice/              # Serviço de dados: dono do MySQL, expõe REST
+│       ├── main.go
+│       ├── handler.go
+│       └── handler_test.go
 ├── bench.sh                      # Script de benchmark comparativo
 ├── docker-compose.yml            # MySQL 8.0 com bind mount
 ├── app/
@@ -376,7 +421,8 @@ go-http-di/
 │   ├── echoadapt/echo.go         # Adapter Echo
 │   └── chiadapt/chi.go           # Adapter chi
 ├── db/
-│   └── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
+│   ├── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
+│   └── restclient/restclient.go  # Adapter REST client (front → dataservice)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL das 3 tabelas; corre só no 1º boot
 │   └── 02-seed.sql               # Bulk seed via CTE recursiva (50k/150k/150k)
@@ -438,6 +484,8 @@ compose up -d`.
 
 ### Executar o servidor manualmente
 
+**MySQL in-process** (default: front fala directamente com o MySQL):
+
 ```bash
 # stdlib (default), conecta a MySQL no DSN default
 go run main.go
@@ -452,7 +500,17 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-Testar (smoke):
+**Microserviço REST** (front delega no dataservice; dois terminais):
+
+```bash
+# Terminal A: serviço de dados (dono do MySQL, REST em :9090)
+go run ./cmd/dataservice -addr :9090
+
+# Terminal B: front (qualquer engine, fala com o dataservice)
+go run main.go -engine fiber -repo rest -repo-addr http://localhost:9090
+```
+
+Testar (smoke, igual independentemente do `-repo`):
 
 ```bash
 curl http://localhost:8080/health
