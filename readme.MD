@@ -342,9 +342,88 @@ Reading:
   the other 9 cells. Last run had the same signature on Gin (`cycled`,
   4.58 ms) that **did not repeat** this run — so likely a GC pause or brief
   contention, not engine-specific. Worth one more pass to confirm.
-- **Compared to the baseline** (next section), JOIN + sqlx + MySQL adds
-  ~310–390 µs of constant p50 — DB+driver account for ~90% of today's
-  latency, framework ≤10%.
+- **Compared to the static `/health` baseline** (below), JOIN + sqlx +
+  MySQL adds ~310–390 µs of constant p50 — DB+driver account for ~90%
+  of today's latency, framework ≤10%.
+
+#### Full matrix — engine × backend × mode
+
+macOS arm64, 5000 req/s × 30s, three backends × two modes per engine
+(30 cells, ~17 min). Fiber rows bolded — it leads p50 in every backend.
+
+| Engine  | Backend | Mode    | Throughput | p50         | p95         | p99           | Success |
+|---------|---------|---------|------------|-------------|-------------|---------------|---------|
+| stdlib  | mysql   | single  | 5000.0/s   | 423.6µs     | 517.2µs     | 687.8µs       | 100.00% |
+| stdlib  | mysql   | cycled  | 5000.0/s   | 407.6µs     | 508.2µs     | 701.6µs       | 100.00% |
+| stdlib  | rest    | single  | 5000.0/s   | 517.0µs     | 659.2µs     | 894.0µs       | 100.00% |
+| stdlib  | rest    | cycled  | 5000.0/s   | 517.1µs     | 676.7µs     | 978.2µs       | 100.00% |
+| stdlib  | grpc    | single  | 5000.0/s   | 555.2µs     | 758.0µs     | **6.85ms** ⚠  | 100.00% |
+| stdlib  | grpc    | cycled  | 5000.0/s   | 557.9µs     | 720.5µs     | 901.1µs       | 100.00% |
+| gin     | mysql   | single  | 5000.0/s   | 397.3µs     | 499.8µs     | 753.5µs       | 100.00% |
+| gin     | mysql   | cycled  | 5000.0/s   | 403.1µs     | 494.0µs     | 676.3µs       | 100.00% |
+| gin     | rest    | single  | 5000.0/s   | 516.6µs     | 670.7µs     | 898.1µs       | 100.00% |
+| gin     | rest    | cycled  | 5000.0/s   | 520.1µs     | 679.7µs     | 885.4µs       | 100.00% |
+| gin     | grpc    | single  | 5000.0/s   | 555.3µs     | 714.9µs     | 897.9µs       | 100.00% |
+| gin     | grpc    | cycled  | 5000.0/s   | 558.1µs     | 721.6µs     | 898.7µs       | 100.00% |
+| fiber   | mysql   | single  | 5000.0/s   | **354.2µs** | **430.6µs** | **630.2µs**   | 100.00% |
+| fiber   | mysql   | cycled  | 5000.0/s   | **359.8µs** | **437.8µs** | **617.4µs**   | 100.00% |
+| fiber   | rest    | single  | 5000.0/s   | **509.3µs** | **637.9µs** | **878.6µs**   | 100.00% |
+| fiber   | rest    | cycled  | 5000.0/s   | **510.4µs** | **646.9µs** | **860.4µs**   | 100.00% |
+| fiber   | grpc    | single  | 5000.0/s   | **543.6µs** | **682.4µs** | **869.9µs**   | 100.00% |
+| fiber   | grpc    | cycled  | 5000.0/s   | **548.8µs** | **692.1µs** | **876.0µs**   | 100.00% |
+| echo    | mysql   | single  | 5000.0/s   | 397.6µs     | 481.5µs     | 670.5µs       | 100.00% |
+| echo    | mysql   | cycled  | 5000.0/s   | 407.7µs     | 546.2µs     | 1.21ms        | 100.00% |
+| echo    | rest    | single  | 5000.0/s   | 523.0µs     | 869.9µs     | **9.80ms** ⚠  | 100.00% |
+| echo    | rest    | cycled  | 5000.0/s   | 516.6µs     | 662.6µs     | 887.0µs       | 100.00% |
+| echo    | grpc    | single  | 5000.0/s   | 555.1µs     | 714.1µs     | 887.8µs       | 100.00% |
+| echo    | grpc    | cycled  | 5000.0/s   | 558.3µs     | 725.7µs     | 925.8µs       | 100.00% |
+| chi     | mysql   | single  | 5000.0/s   | 395.4µs     | 477.5µs     | 660.5µs       | 100.00% |
+| chi     | mysql   | cycled  | 5000.0/s   | 397.8µs     | 484.3µs     | 653.3µs       | 100.00% |
+| chi     | rest    | single  | 5000.0/s   | 515.0µs     | 656.9µs     | 869.4µs       | 100.00% |
+| chi     | rest    | cycled  | 5000.0/s   | 518.6µs     | 665.1µs     | 869.8µs       | 100.00% |
+| chi     | grpc    | single  | 5000.0/s   | 568.1µs     | 827.8µs     | 1.33ms        | 100.00% |
+| chi     | grpc    | cycled  | 5000.0/s   | 563.4µs     | 1.52ms      | **21.94ms** ⚠ | 100.00% |
+
+Backend cost (p50 averaged across the 10 cells per backend):
+
+| Backend | avg p50 | Overhead vs mysql |
+|---------|---------|-------------------|
+| mysql   | 394 µs  | —                 |
+| rest    | 516 µs  | **+122 µs (+31%)** |
+| grpc    | 556 µs  | **+162 µs (+41%)** |
+
+Readings:
+
+- **REST is faster than gRPC here.** Counterintuitive but real for this
+  payload (~250 B). gRPC pays HTTP/2 framing + protobuf marshal/unmarshal
+  on both ends; for tiny aggregates the wire savings don't outweigh the
+  per-call setup. gRPC starts to win on streaming, large payloads, or
+  cross-language type safety — none of which this benchmark exercises.
+- **Fiber wins on every backend**, but the gap shrinks as I/O grows:
+  ~40 µs ahead in mysql, ~7 µs in rest, ~10 µs in grpc. Once the network
+  dominates, framework choice matters less — under `grpc` all five
+  engines fit inside a 25 µs band at p50.
+- **`single` vs `cycled` is essentially identical across all 30 cells**,
+  same conclusion as the bench.sh run: the 150k working set fits the
+  default 128 MB InnoDB buffer pool, so we measure index walk + JOIN
+  planner, not disk I/O.
+- **Tail outliers** — three p99 spikes worth flagging: stdlib/grpc/single
+  (6.85 ms), echo/rest/single (9.80 ms), and chi/grpc/cycled (21.94 ms).
+  Their respective p95 values are well-behaved, so these are individual
+  transient pauses (likely GC), not systemic regressions. Re-running
+  these three cells would confirm.
+
+Practical takeaway:
+
+- **In-process beats network when you can afford it.** REST adds ~31%
+  p50, gRPC ~41% — same payload, same DB, same stack except the hop.
+- **For microservices with small JSON payloads, REST is the default**;
+  gRPC earns its keep with streaming, cross-language contracts, or when
+  wire bandwidth becomes the bottleneck.
+- **Framework choice matters most when the framework is the bottleneck.**
+  In-process at 5000 req/s, fiber's ~10% edge is real and worth taking.
+  Behind a network hop, the five engines collapse into the same tier
+  — pick by ergonomics, not by µs.
 
 #### Previous baseline — static `/health` (reference)
 
@@ -740,9 +819,91 @@ Leituras:
   (`cycled`, 4.58 ms) e **não se repetiu** desta vez — portanto é
   provavelmente uma pausa de GC ou contention pontual, não específico do
   engine. Vale uma nova execução para confirmar.
-- **Comparado à baseline** (próxima secção), JOIN + sqlx + MySQL adiciona
-  ~310–390 µs de p50 constantes — DB+driver representam ~90% da latência
-  hoje, framework ≤10%.
+- **Comparado à baseline estática do `/health`** (mais abaixo), JOIN +
+  sqlx + MySQL adiciona ~310–390 µs de p50 constantes — DB+driver
+  representam ~90% da latência hoje, framework ≤10%.
+
+#### Matriz cheia — engine × backend × modo
+
+macOS arm64, 5000 req/s × 30s, três backends × dois modos por engine
+(30 cells, ~17 min). Linhas do Fiber a negrito — lidera o p50 em todos
+os backends.
+
+| Engine  | Backend | Mode    | Throughput | p50         | p95         | p99           | Success |
+|---------|---------|---------|------------|-------------|-------------|---------------|---------|
+| stdlib  | mysql   | single  | 5000.0/s   | 423.6µs     | 517.2µs     | 687.8µs       | 100.00% |
+| stdlib  | mysql   | cycled  | 5000.0/s   | 407.6µs     | 508.2µs     | 701.6µs       | 100.00% |
+| stdlib  | rest    | single  | 5000.0/s   | 517.0µs     | 659.2µs     | 894.0µs       | 100.00% |
+| stdlib  | rest    | cycled  | 5000.0/s   | 517.1µs     | 676.7µs     | 978.2µs       | 100.00% |
+| stdlib  | grpc    | single  | 5000.0/s   | 555.2µs     | 758.0µs     | **6.85ms** ⚠  | 100.00% |
+| stdlib  | grpc    | cycled  | 5000.0/s   | 557.9µs     | 720.5µs     | 901.1µs       | 100.00% |
+| gin     | mysql   | single  | 5000.0/s   | 397.3µs     | 499.8µs     | 753.5µs       | 100.00% |
+| gin     | mysql   | cycled  | 5000.0/s   | 403.1µs     | 494.0µs     | 676.3µs       | 100.00% |
+| gin     | rest    | single  | 5000.0/s   | 516.6µs     | 670.7µs     | 898.1µs       | 100.00% |
+| gin     | rest    | cycled  | 5000.0/s   | 520.1µs     | 679.7µs     | 885.4µs       | 100.00% |
+| gin     | grpc    | single  | 5000.0/s   | 555.3µs     | 714.9µs     | 897.9µs       | 100.00% |
+| gin     | grpc    | cycled  | 5000.0/s   | 558.1µs     | 721.6µs     | 898.7µs       | 100.00% |
+| fiber   | mysql   | single  | 5000.0/s   | **354.2µs** | **430.6µs** | **630.2µs**   | 100.00% |
+| fiber   | mysql   | cycled  | 5000.0/s   | **359.8µs** | **437.8µs** | **617.4µs**   | 100.00% |
+| fiber   | rest    | single  | 5000.0/s   | **509.3µs** | **637.9µs** | **878.6µs**   | 100.00% |
+| fiber   | rest    | cycled  | 5000.0/s   | **510.4µs** | **646.9µs** | **860.4µs**   | 100.00% |
+| fiber   | grpc    | single  | 5000.0/s   | **543.6µs** | **682.4µs** | **869.9µs**   | 100.00% |
+| fiber   | grpc    | cycled  | 5000.0/s   | **548.8µs** | **692.1µs** | **876.0µs**   | 100.00% |
+| echo    | mysql   | single  | 5000.0/s   | 397.6µs     | 481.5µs     | 670.5µs       | 100.00% |
+| echo    | mysql   | cycled  | 5000.0/s   | 407.7µs     | 546.2µs     | 1.21ms        | 100.00% |
+| echo    | rest    | single  | 5000.0/s   | 523.0µs     | 869.9µs     | **9.80ms** ⚠  | 100.00% |
+| echo    | rest    | cycled  | 5000.0/s   | 516.6µs     | 662.6µs     | 887.0µs       | 100.00% |
+| echo    | grpc    | single  | 5000.0/s   | 555.1µs     | 714.1µs     | 887.8µs       | 100.00% |
+| echo    | grpc    | cycled  | 5000.0/s   | 558.3µs     | 725.7µs     | 925.8µs       | 100.00% |
+| chi     | mysql   | single  | 5000.0/s   | 395.4µs     | 477.5µs     | 660.5µs       | 100.00% |
+| chi     | mysql   | cycled  | 5000.0/s   | 397.8µs     | 484.3µs     | 653.3µs       | 100.00% |
+| chi     | rest    | single  | 5000.0/s   | 515.0µs     | 656.9µs     | 869.4µs       | 100.00% |
+| chi     | rest    | cycled  | 5000.0/s   | 518.6µs     | 665.1µs     | 869.8µs       | 100.00% |
+| chi     | grpc    | single  | 5000.0/s   | 568.1µs     | 827.8µs     | 1.33ms        | 100.00% |
+| chi     | grpc    | cycled  | 5000.0/s   | 563.4µs     | 1.52ms      | **21.94ms** ⚠ | 100.00% |
+
+Custo por backend (p50 médio das 10 cells de cada backend):
+
+| Backend | p50 médio | Overhead vs mysql |
+|---------|-----------|-------------------|
+| mysql   | 394 µs    | —                 |
+| rest    | 516 µs    | **+122 µs (+31%)** |
+| grpc    | 556 µs    | **+162 µs (+41%)** |
+
+Leituras:
+
+- **REST é mais rápido que gRPC neste cenário.** Contraintuitivo mas
+  real para este payload (~250 B). O gRPC paga framing HTTP/2 +
+  marshal/unmarshal protobuf nas duas pontas; para agregados pequenos a
+  poupança no wire não compensa o setup por chamada. O gRPC começa a
+  ganhar em streaming, payloads grandes ou tipagem forte cross-language
+  — nada disso é exercitado neste benchmark.
+- **O Fiber ganha em todos os backends**, mas a vantagem encolhe à
+  medida que o I/O cresce: ~40 µs à frente em mysql, ~7 µs em rest,
+  ~10 µs em grpc. Quando a rede domina, a escolha de framework importa
+  menos — em `grpc`, os cinco engines cabem numa banda de 25 µs no p50.
+- **`single` vs `cycled` é praticamente idêntico nos 30 cells**, mesma
+  conclusão do bench.sh: os 150k IDs cabem nos 128 MB default do buffer
+  pool InnoDB, portanto estamos a medir index walk + planner de JOIN,
+  não disk I/O.
+- **Outliers de cauda** — três spikes de p99 a destacar:
+  stdlib/grpc/single (6.85 ms), echo/rest/single (9.80 ms) e
+  chi/grpc/cycled (21.94 ms). Os p95 correspondentes estão bem
+  comportados, logo são pausas pontuais (provavelmente GC), não
+  regressões sistémicas. Repetir esses três cells confirmaria.
+
+Conclusões práticas:
+
+- **In-process bate rede quando dá para escolher.** REST adiciona ~31%
+  no p50, gRPC ~41% — mesmo payload, mesmo DB, mesma stack tirando o
+  hop.
+- **Para microserviços com payloads JSON pequenos, REST é o default**;
+  o gRPC justifica-se com streaming, contratos cross-language, ou
+  quando a largura de banda do wire é o gargalo.
+- **A escolha de framework importa mais quando a framework é o
+  gargalo.** In-process a 5000 req/s, a vantagem de ~10% do Fiber é
+  real e vale a pena. Atrás de um hop de rede, os cinco engines
+  colapsam no mesmo tier — escolhe por ergonomia, não por µs.
 
 #### Baseline anterior — `/health` estático (referência)
 
