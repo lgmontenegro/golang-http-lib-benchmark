@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"example.com/httpdi/app"
+	"example.com/httpdi/serde"
 )
 
 type fakeTxRepo struct {
@@ -58,6 +59,50 @@ func TestGetTransactionHandlerFound(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, sample) {
 		t.Errorf("body = %+v\nwant     = %+v", got, sample)
+	}
+}
+
+func TestGetTransactionHandlerContentNegotiation(t *testing.T) {
+	sample := app.Transaction{
+		ID:         "abc",
+		Value:      100.50,
+		CreateDate: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Customer: app.Customer{
+			ID:         "cust-1",
+			Nome:       "Customer #1",
+			CreateDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		CartSnapshot: app.CartSnapshot{
+			ID:         "cart-1",
+			CreateDate: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/transaction/{id}", makeGetTransactionHandler(fakeTxRepo{tx: sample}))
+
+	codecs := []serde.Codec{serde.JSON, serde.Protobuf, serde.Avro}
+	for _, codec := range codecs {
+		t.Run(codec.ContentType(), func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/transaction/abc", nil)
+			req.Header.Set("Accept", codec.ContentType())
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if got := rec.Header().Get("Content-Type"); got != codec.ContentType() {
+				t.Errorf("Content-Type = %q, want %q", got, codec.ContentType())
+			}
+			got, err := codec.Unmarshal(rec.Body.Bytes())
+			if err != nil {
+				t.Fatalf("decode %s body: %v", codec.ContentType(), err)
+			}
+			if !reflect.DeepEqual(got, sample) {
+				t.Errorf("body = %+v\nwant     = %+v", got, sample)
+			}
+		})
 	}
 }
 

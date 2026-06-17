@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"example.com/httpdi/app"
+	"example.com/httpdi/serde"
 )
 
 // healthHandler answers a static readiness probe. Used by bench-full.sh
@@ -18,9 +19,12 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 // makeGetTransactionHandler returns an http.HandlerFunc that fetches an
-// aggregate by id from the given repository. 200 with the JSON aggregate
-// on success, 404 if missing (sentinel mapped to status), 500 otherwise.
-// The repo is constructor-injected so tests can drive it with a fake.
+// aggregate by id from the given repository. The success body is encoded in
+// the format the caller asks for via the Accept header (JSON, protobuf, or
+// Avro — see serde.ForAccept), so the same endpoint serves every REST
+// serialization backend. 200 on success, 404 if missing (sentinel mapped to
+// status), 500 otherwise. Error bodies stay JSON. The repo is
+// constructor-injected so tests can drive it with a fake.
 func makeGetTransactionHandler(repo app.TransactionRepository) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
@@ -34,7 +38,19 @@ func makeGetTransactionHandler(repo app.TransactionRepository) http.HandlerFunc 
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
 			return
 		}
-		writeJSON(w, http.StatusOK, tx)
+
+		codec := serde.ForAccept(r.Header.Get("Accept"))
+		body, err := codec.Marshal(tx)
+		if err != nil {
+			log.Printf("dataservice: marshal %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
+			return
+		}
+		w.Header().Set("Content-Type", codec.ContentType())
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(body); err != nil {
+			log.Printf("dataservice: write response %s: %v", id, err)
+		}
 	}
 }
 

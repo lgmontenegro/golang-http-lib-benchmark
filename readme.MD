@@ -10,21 +10,33 @@ A proof of concept demonstrating dependency inversion in Go to swap between
 five HTTP frameworks (stdlib, Gin, Fiber, Echo, chi) and compare their
 performance under steady load with vegeta.
 
-The front service can resolve the transaction aggregate in three ways
-selected by the `-repo` flag:
+The front service can resolve the transaction aggregate through several
+driven adapters selected by the `-repo` flag — each a **(transport,
+serialization)** pair so the benchmark isolates protocol from wire format:
 
-- **`mysql`** *(default)* — in-process: front talks to MySQL directly via
-  sqlx.
-- **`rest`** — over the network: front delegates to a separate
-  **dataservice** (`cmd/dataservice`) over HTTP+JSON.
-- **`grpc`** — over the network: same dataservice, gRPC (HTTP/2 +
-  protobuf) instead of REST.
+| `-repo`       | transport     | serialization | dataservice port |
+|---------------|---------------|---------------|------------------|
+| `mysql` *(def)* | in-process  | —             | —                |
+| `rest`        | HTTP/1.1      | JSON          | `:9090`          |
+| `resth2`      | HTTP/2 (h2c)  | JSON          | `:9092`          |
+| `resth2-pb`   | HTTP/2 (h2c)  | protobuf      | `:9092`          |
+| `resth2-avro` | HTTP/2 (h2c)  | Avro          | `:9092`          |
+| `grpc`        | gRPC          | protobuf      | `:9091`          |
+| `grpc-avro`   | gRPC          | Avro          | `:9091`          |
 
-The dataservice owns the MySQL connection and exposes both REST and gRPC
-from the same binary (`:9090` and `:9091` by default), so the front picks
-the protocol at startup. Same shape, same `app.TransactionRepository`
-interface — only the adapter differs. The benchmark covers the full path:
-framework + (sqlx or REST hop or gRPC hop) + MySQL.
+This makes two questions answerable cleanly, each holding everything else
+fixed: **HTTP/1.1 vs HTTP/2** (`rest` vs `resth2`), **HTTP/2 vs gRPC** with
+serialization held to protobuf (`resth2-pb` vs `grpc`), and **protobuf vs
+Avro** on each transport (`resth2-pb` vs `resth2-avro`; `grpc` vs
+`grpc-avro`).
+
+The dataservice owns the MySQL connection and exposes all three transports
+from the same binary (REST/HTTP1 `:9090`, gRPC `:9091`, REST/h2c `:9092`),
+so the front picks the pair at startup. The REST endpoint content-negotiates
+JSON/protobuf/Avro via the `Accept` header; gRPC serves protobuf and Avro on
+the same listener via content-subtype. Same shape, same
+`app.TransactionRepository` interface — only the adapter differs. The
+benchmark covers the full path: framework + (sqlx or REST/gRPC hop) + MySQL.
 
 ### Table of contents
 
@@ -57,16 +69,20 @@ go install github.com/tsenart/vegeta@latest
 go-http-di/
 ├── main.go                       # Front service: composition root, -engine + -repo
 ├── cmd/
-│   └── dataservice/              # Data service: owns MySQL, exposes REST + gRPC
+│   └── dataservice/              # Data service: owns MySQL, exposes REST/HTTP1 + REST/h2c + gRPC
 │       ├── main.go
-│       ├── handler.go            # REST handler (stdlib net/http)
+│       ├── handler.go            # REST handler (content-negotiated JSON/protobuf/Avro)
 │       ├── handler_test.go
-│       └── grpc.go               # gRPC TransactionService impl
+│       ├── grpc.go               # gRPC TransactionService impl (protobuf)
+│       └── grpc_avro.go          # gRPC TransactionServiceAvro impl (manual ServiceDesc)
 ├── proto/
-│   ├── transactions.proto        # gRPC wire schema
+│   ├── transactions.proto        # protobuf gRPC wire schema
 │   └── transactionspb/           # generated Go stubs (committed)
+├── serde/                        # Serialization codecs (JSON/protobuf/Avro); Avro schema lives here
+│   ├── serde.go                  # Codec port + ForAccept factory
+│   └── json.go / protobuf.go / avro.go
 ├── bench.sh                      # Engine comparison (5 engines × 2 modes, mysql repo only)
-├── bench-full.sh                 # Full matrix (5 engines × 3 backends × 2 modes)
+├── bench-full.sh                 # Full matrix (5 engines × 7 backends × 2 modes)
 ├── docker-compose.yml            # MySQL 8.0 with bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -80,8 +96,9 @@ go-http-di/
 │   └── chiadapt/chi.go           # chi adapter
 ├── db/
 │   ├── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
-│   ├── restclient/restclient.go  # REST client adapter (front → dataservice over HTTP+JSON)
-│   └── grpcclient/grpcclient.go  # gRPC client adapter (front → dataservice over HTTP/2 + protobuf)
+│   ├── restclient/restclient.go  # REST client adapter (HTTP/1.1 or h2c; codec-pluggable)
+│   ├── grpcclient/grpcclient.go  # gRPC client adapter (protobuf)
+│   └── grpcavroclient/grpcavroclient.go # gRPC client adapter (Avro codec)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL for the 3 tables; runs only on first boot
 │   └── 02-seed.sql               # Bulk seed via recursive CTE (50k/150k/150k)
@@ -162,12 +179,16 @@ go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTi
 **Microservice topology — REST or gRPC** (two terminals):
 
 ```bash
-# Terminal A: data tier (owns MySQL, REST :9090 + gRPC :9091)
-go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091
+# Terminal A: data tier (owns MySQL, REST/HTTP1 :9090, gRPC :9091, REST/h2c :9092)
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091 -rest-h2c-addr :9092
 
-# Terminal B: front picks the protocol (any engine)
-go run main.go -engine fiber -repo rest -repo-addr http://localhost:9090
-go run main.go -engine fiber -repo grpc -repo-addr localhost:9091
+# Terminal B: front picks the (transport, serialization) pair (any engine)
+go run main.go -engine fiber -repo rest        -repo-addr http://localhost:9090   # HTTP/1.1 + JSON
+go run main.go -engine fiber -repo resth2      -repo-addr http://localhost:9092   # HTTP/2  + JSON
+go run main.go -engine fiber -repo resth2-pb   -repo-addr http://localhost:9092   # HTTP/2  + protobuf
+go run main.go -engine fiber -repo resth2-avro -repo-addr http://localhost:9092   # HTTP/2  + Avro
+go run main.go -engine fiber -repo grpc        -repo-addr localhost:9091          # gRPC    + protobuf
+go run main.go -engine fiber -repo grpc-avro   -repo-addr localhost:9091          # gRPC    + Avro
 ```
 
 Regenerate the proto stubs **only when [proto/transactions.proto](proto/transactions.proto)
@@ -221,12 +242,16 @@ Two scripts answer two different questions:
   `-repo mysql` (in-process). Varies engine × mode (5 × 2 = 10 cells).
   ~5 min. Use this for quick iteration.
 - **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 together*: how does
-  each framework behave under each backend protocol? Full matrix
-  engine × backend × mode (5 × 3 × 2 = 30 cells). ~17 min. Output is
-  grouped per engine — 5 sub-tables of 6 rows each, so you can read
-  "for engine X, mysql vs rest vs grpc" directly. Writes to
-  `bench-results-full/`. Auto-starts `cmd/dataservice` and tears it
-  down on EXIT.
+  each framework behave under each (transport, serialization)? Full matrix
+  engine × backend × mode (5 × 7 × 2 = 70 cells). ~40 min. The 7 backends
+  are `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/`resth2-avro`
+  (h2c + json/pb/avro), `grpc` (pb) and `grpc-avro`. Output is grouped per
+  engine — 5 sub-tables of 14 rows each, so you can read HTTP/1.1 vs HTTP/2
+  (`rest` vs `resth2`), HTTP/2 vs gRPC (`resth2-pb` vs `grpc`) and protobuf
+  vs Avro (`resth2-pb` vs `resth2-avro`; `grpc` vs `grpc-avro`) directly.
+  Writes to `bench-results-full/`. Auto-starts `cmd/dataservice` (all three
+  ports) and tears it down on EXIT. Trim the `BACKENDS` array if 70 cells is
+  too long.
 
 ```bash
 chmod +x bench.sh bench-full.sh
@@ -346,84 +371,76 @@ Reading:
   MySQL adds ~310–390 µs of constant p50 — DB+driver account for ~90%
   of today's latency, framework ≤10%.
 
-#### Full matrix — engine × backend × mode
+#### Full matrix — transport × serialization
 
-macOS arm64, 5000 req/s × 30s, three backends × two modes per engine
-(30 cells, ~17 min). Fiber rows bolded — it leads p50 in every backend.
+macOS arm64, 5000 req/s × 30s, 7 backends × 2 modes per engine (70 cells,
+~40 min). Every cell sustained 5000 req/s at 100% success — nobody saturated,
+so latency is the story. **p50, `single` mode** below (full per-cell data —
+p95/p99 and `cycled` — in `bench-results-full/summary.txt`):
 
-| Engine  | Backend | Mode    | Throughput | p50         | p95         | p99           | Success |
-|---------|---------|---------|------------|-------------|-------------|---------------|---------|
-| stdlib  | mysql   | single  | 5000.0/s   | 423.6µs     | 517.2µs     | 687.8µs       | 100.00% |
-| stdlib  | mysql   | cycled  | 5000.0/s   | 407.6µs     | 508.2µs     | 701.6µs       | 100.00% |
-| stdlib  | rest    | single  | 5000.0/s   | 517.0µs     | 659.2µs     | 894.0µs       | 100.00% |
-| stdlib  | rest    | cycled  | 5000.0/s   | 517.1µs     | 676.7µs     | 978.2µs       | 100.00% |
-| stdlib  | grpc    | single  | 5000.0/s   | 555.2µs     | 758.0µs     | **6.85ms** ⚠  | 100.00% |
-| stdlib  | grpc    | cycled  | 5000.0/s   | 557.9µs     | 720.5µs     | 901.1µs       | 100.00% |
-| gin     | mysql   | single  | 5000.0/s   | 397.3µs     | 499.8µs     | 753.5µs       | 100.00% |
-| gin     | mysql   | cycled  | 5000.0/s   | 403.1µs     | 494.0µs     | 676.3µs       | 100.00% |
-| gin     | rest    | single  | 5000.0/s   | 516.6µs     | 670.7µs     | 898.1µs       | 100.00% |
-| gin     | rest    | cycled  | 5000.0/s   | 520.1µs     | 679.7µs     | 885.4µs       | 100.00% |
-| gin     | grpc    | single  | 5000.0/s   | 555.3µs     | 714.9µs     | 897.9µs       | 100.00% |
-| gin     | grpc    | cycled  | 5000.0/s   | 558.1µs     | 721.6µs     | 898.7µs       | 100.00% |
-| fiber   | mysql   | single  | 5000.0/s   | **354.2µs** | **430.6µs** | **630.2µs**   | 100.00% |
-| fiber   | mysql   | cycled  | 5000.0/s   | **359.8µs** | **437.8µs** | **617.4µs**   | 100.00% |
-| fiber   | rest    | single  | 5000.0/s   | **509.3µs** | **637.9µs** | **878.6µs**   | 100.00% |
-| fiber   | rest    | cycled  | 5000.0/s   | **510.4µs** | **646.9µs** | **860.4µs**   | 100.00% |
-| fiber   | grpc    | single  | 5000.0/s   | **543.6µs** | **682.4µs** | **869.9µs**   | 100.00% |
-| fiber   | grpc    | cycled  | 5000.0/s   | **548.8µs** | **692.1µs** | **876.0µs**   | 100.00% |
-| echo    | mysql   | single  | 5000.0/s   | 397.6µs     | 481.5µs     | 670.5µs       | 100.00% |
-| echo    | mysql   | cycled  | 5000.0/s   | 407.7µs     | 546.2µs     | 1.21ms        | 100.00% |
-| echo    | rest    | single  | 5000.0/s   | 523.0µs     | 869.9µs     | **9.80ms** ⚠  | 100.00% |
-| echo    | rest    | cycled  | 5000.0/s   | 516.6µs     | 662.6µs     | 887.0µs       | 100.00% |
-| echo    | grpc    | single  | 5000.0/s   | 555.1µs     | 714.1µs     | 887.8µs       | 100.00% |
-| echo    | grpc    | cycled  | 5000.0/s   | 558.3µs     | 725.7µs     | 925.8µs       | 100.00% |
-| chi     | mysql   | single  | 5000.0/s   | 395.4µs     | 477.5µs     | 660.5µs       | 100.00% |
-| chi     | mysql   | cycled  | 5000.0/s   | 397.8µs     | 484.3µs     | 653.3µs       | 100.00% |
-| chi     | rest    | single  | 5000.0/s   | 515.0µs     | 656.9µs     | 869.4µs       | 100.00% |
-| chi     | rest    | cycled  | 5000.0/s   | 518.6µs     | 665.1µs     | 869.8µs       | 100.00% |
-| chi     | grpc    | single  | 5000.0/s   | 568.1µs     | 827.8µs     | 1.33ms        | 100.00% |
-| chi     | grpc    | cycled  | 5000.0/s   | 563.4µs     | 1.52ms      | **21.94ms** ⚠ | 100.00% |
+| Engine | mysql | rest (h1/json) | resth2 (h2/json) | resth2-pb (h2/pb) | resth2-avro (h2/avro) | grpc (pb) | grpc-avro |
+|--------|------:|------:|------:|------:|------:|------:|------:|
+| stdlib | 431µs | 525µs | 543µs | 538µs | 542µs | 558µs | 558µs |
+| gin    | 398µs | 520µs | 544µs | 543µs | 543µs | 562µs | 560µs |
+| fiber  | **359µs** | **513µs** | **535µs** | **530µs** | **533µs** | **548µs** | **546µs** |
+| echo   | 397µs | 521µs | 544µs | 543µs | 537µs | 559µs | 556µs |
+| chi    | 400µs | 523µs | 543µs | 541µs | 540µs | 560µs | 558µs |
 
-Backend cost (p50 averaged across the 10 cells per backend):
+Backend cost (p50 averaged across the 10 cells per backend, single+cycled):
 
-| Backend | avg p50 | Overhead vs mysql |
-|---------|---------|-------------------|
-| mysql   | 394 µs  | —                 |
-| rest    | 516 µs  | **+122 µs (+31%)** |
-| grpc    | 556 µs  | **+162 µs (+41%)** |
+| Backend       | transport    | serialization | avg p50 | Overhead vs mysql |
+|---------------|--------------|---------------|---------|-------------------|
+| mysql         | in-process   | —             | 399 µs  | —                 |
+| rest          | HTTP/1.1     | JSON          | 522 µs  | +123 µs (+31%)    |
+| resth2-avro   | HTTP/2 (h2c) | Avro          | 542 µs  | +143 µs (+36%)    |
+| resth2-pb     | HTTP/2 (h2c) | protobuf      | 544 µs  | +145 µs (+36%)    |
+| resth2        | HTTP/2 (h2c) | JSON          | 547 µs  | +148 µs (+37%)    |
+| grpc-avro     | gRPC         | Avro          | 557 µs  | +158 µs (+40%)    |
+| grpc          | gRPC         | protobuf      | 559 µs  | +160 µs (+40%)    |
 
-Readings:
+Readings — each axis isolated by holding the other fixed:
 
-- **REST is faster than gRPC here.** Counterintuitive but real for this
-  payload (~250 B). gRPC pays HTTP/2 framing + protobuf marshal/unmarshal
-  on both ends; for tiny aggregates the wire savings don't outweigh the
-  per-call setup. gRPC starts to win on streaming, large payloads, or
-  cross-language type safety — none of which this benchmark exercises.
-- **Fiber wins on every backend**, but the gap shrinks as I/O grows:
-  ~40 µs ahead in mysql, ~7 µs in rest, ~10 µs in grpc. Once the network
-  dominates, framework choice matters less — under `grpc` all five
-  engines fit inside a 25 µs band at p50.
-- **`single` vs `cycled` is essentially identical across all 30 cells**,
-  same conclusion as the bench.sh run: the 150k working set fits the
-  default 128 MB InnoDB buffer pool, so we measure index walk + JOIN
-  planner, not disk I/O.
-- **Tail outliers** — three p99 spikes worth flagging: stdlib/grpc/single
-  (6.85 ms), echo/rest/single (9.80 ms), and chi/grpc/cycled (21.94 ms).
-  Their respective p95 values are well-behaved, so these are individual
-  transient pauses (likely GC), not systemic regressions. Re-running
-  these three cells would confirm.
+- **protobuf vs Avro is a tie.** `resth2-pb` (544) ≈ `resth2-avro` (542) on
+  HTTP/2; `grpc` (559) ≈ `grpc-avro` (557) on gRPC. The gaps (~2 µs) are
+  inside the noise. For a ~250 B aggregate the serialization cost is
+  negligible against the JOIN + round-trip — **serialization is not the
+  bottleneck**, so the binary-vs-binary choice buys nothing here.
+- **JSON doesn't lose to binary either.** `resth2` (json, 547) ≈ `resth2-pb`
+  (544) ≈ `resth2-avro` (542). Same reason: encode/decode is rounding error
+  next to the DB hop. Swapping JSON for protobuf/Avro at this payload size is
+  not worth the schema machinery on latency grounds alone.
+- **gRPC is ~15 µs *slower* than plain HTTP/2 with the same protobuf**
+  (`grpc` 559 vs `resth2-pb` 544, every engine). gRPC's framing costs a bit
+  more than h2c for a simple unary call; it earns its keep with streaming,
+  multiplexing under load, or cross-language contracts — none exercised here.
+- **HTTP/2 is ~25 µs *slower* than HTTP/1.1** for JSON (`resth2` 547 vs
+  `rest` 522). On a single sequential loopback connection, HTTP/2's
+  multiplexing brings no benefit while HPACK/framing add overhead. HTTP/2
+  pays off with many concurrent streams, which this attack pattern lacks.
+- **The dominant axis is the framework, not the protocol.** Fiber (359 µs
+  in-process) leads the pack by ~40–70 µs — a wider spread than any
+  transport/serialization difference on the network backends.
+- **`single` vs `cycled` is essentially identical across all 70 cells** —
+  the 150k working set fits the default 128 MB InnoDB buffer pool, so we
+  measure index walk + JOIN planner, not disk I/O.
+- **One tail outlier:** gin/resth2-pb/cycled p99 = 2.31 ms vs ~850 µs
+  elsewhere; its p95 is well-behaved, so it's a transient pause (likely GC),
+  not a regression.
 
 Practical takeaway:
 
-- **In-process beats network when you can afford it.** REST adds ~31%
-  p50, gRPC ~41% — same payload, same DB, same stack except the hop.
-- **For microservices with small JSON payloads, REST is the default**;
-  gRPC earns its keep with streaming, cross-language contracts, or when
-  wire bandwidth becomes the bottleneck.
+- **The network hop dominates everything else.** In-process (~399 µs) →
+  any network backend (~520–560 µs) is a flat ~120–160 µs tax, roughly the
+  same regardless of protocol or wire format. Stay in-process when you can.
+- **At small payloads, pick the protocol for ergonomics, not latency.**
+  REST/JSON is the simplest and the *fastest* network option here; HTTP/2
+  and gRPC and binary serialization all cost a little more, not less.
+  protobuf/Avro/gRPC earn their keep with large payloads, streaming, or
+  cross-language type safety — re-run with a bigger aggregate to see the
+  serialization axis actually separate.
 - **Framework choice matters most when the framework is the bottleneck.**
-  In-process at 5000 req/s, fiber's ~10% edge is real and worth taking.
-  Behind a network hop, the five engines collapse into the same tier
-  — pick by ergonomics, not by µs.
+  In-process, fiber's ~10% edge is real. Behind a network hop the five
+  engines collapse into a ~15 µs band — pick by ergonomics, not by µs.
 
 #### Previous baseline — static `/health` (reference)
 
@@ -485,21 +502,32 @@ Prova de conceito que demonstra inversão de dependência em Go para trocar
 entre cinco frameworks HTTP (stdlib, Gin, Fiber, Echo, chi) e comparar as
 suas performances sob carga constante com vegeta.
 
-O serviço front pode resolver o agregado de três formas, selecionadas
-pela flag `-repo`:
+O serviço front pode resolver o agregado por vários adapters, selecionados
+pela flag `-repo` — cada um um par **(transporte, serialização)** para o
+benchmark isolar protocolo de formato de fio:
 
-- **`mysql`** *(default)* — in-process: o front fala com o MySQL
-  directamente via sqlx.
-- **`rest`** — sobre a rede: o front delega num **dataservice** separado
-  (`cmd/dataservice`) por HTTP+JSON.
-- **`grpc`** — sobre a rede: mesmo dataservice, gRPC (HTTP/2 + protobuf)
-  em vez de REST.
+| `-repo`       | transporte    | serialização | porta dataservice |
+|---------------|---------------|--------------|-------------------|
+| `mysql` *(def)* | in-process  | —            | —                 |
+| `rest`        | HTTP/1.1      | JSON         | `:9090`           |
+| `resth2`      | HTTP/2 (h2c)  | JSON         | `:9092`           |
+| `resth2-pb`   | HTTP/2 (h2c)  | protobuf     | `:9092`           |
+| `resth2-avro` | HTTP/2 (h2c)  | Avro         | `:9092`           |
+| `grpc`        | gRPC          | protobuf     | `:9091`           |
+| `grpc-avro`   | gRPC          | Avro         | `:9091`           |
 
-O dataservice é o dono da ligação ao MySQL e expõe REST e gRPC no mesmo
-binário (`:9090` e `:9091` por default), portanto o front escolhe o
-protocolo no arranque. Mesma shape, mesma interface
-`app.TransactionRepository` — só muda o adapter. O benchmark cobre o
-caminho completo: framework + (sqlx ou hop REST ou hop gRPC) + MySQL.
+Isso torna duas perguntas respondíveis de forma limpa, cada uma fixando o
+resto: **HTTP/1.1 vs HTTP/2** (`rest` vs `resth2`), **HTTP/2 vs gRPC** com a
+serialização presa em protobuf (`resth2-pb` vs `grpc`) e **protobuf vs Avro**
+em cada transporte (`resth2-pb` vs `resth2-avro`; `grpc` vs `grpc-avro`).
+
+O dataservice é o dono da ligação ao MySQL e expõe os três transportes no
+mesmo binário (REST/HTTP1 `:9090`, gRPC `:9091`, REST/h2c `:9092`), portanto
+o front escolhe o par no arranque. O endpoint REST faz content-negotiation de
+JSON/protobuf/Avro pelo header `Accept`; o gRPC serve protobuf e Avro no mesmo
+listener via content-subtype. Mesma shape, mesma interface
+`app.TransactionRepository` — só muda o adapter. O benchmark cobre o caminho
+completo: framework + (sqlx ou hop REST/gRPC) + MySQL.
 
 ### Índice
 
@@ -532,16 +560,20 @@ go install github.com/tsenart/vegeta@latest
 go-http-di/
 ├── main.go                       # Serviço front: composition root, -engine + -repo
 ├── cmd/
-│   └── dataservice/              # Serviço de dados: dono do MySQL, expõe REST + gRPC
+│   └── dataservice/              # Serviço de dados: dono do MySQL, expõe REST/HTTP1 + REST/h2c + gRPC
 │       ├── main.go
-│       ├── handler.go            # Handler REST (stdlib net/http)
+│       ├── handler.go            # Handler REST (content-negotiation JSON/protobuf/Avro)
 │       ├── handler_test.go
-│       └── grpc.go               # Implementação do TransactionService em gRPC
+│       ├── grpc.go               # TransactionService em gRPC (protobuf)
+│       └── grpc_avro.go          # TransactionServiceAvro em gRPC (ServiceDesc manual)
 ├── proto/
-│   ├── transactions.proto        # Schema gRPC
+│   ├── transactions.proto        # Schema gRPC protobuf
 │   └── transactionspb/           # Stubs Go gerados (commitados)
+├── serde/                        # Codecs de serialização (JSON/protobuf/Avro); schema Avro vive aqui
+│   ├── serde.go                  # Porta Codec + fábrica ForAccept
+│   └── json.go / protobuf.go / avro.go
 ├── bench.sh                      # Comparação de engines (5 × 2 modos, só -repo mysql)
-├── bench-full.sh                 # Matriz cheia (5 engines × 3 backends × 2 modos)
+├── bench-full.sh                 # Matriz cheia (5 engines × 7 backends × 2 modos)
 ├── docker-compose.yml            # MySQL 8.0 com bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -555,8 +587,9 @@ go-http-di/
 │   └── chiadapt/chi.go           # Adapter chi
 ├── db/
 │   ├── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
-│   ├── restclient/restclient.go  # Adapter REST client (front → dataservice por HTTP+JSON)
-│   └── grpcclient/grpcclient.go  # Adapter gRPC client (front → dataservice por HTTP/2 + protobuf)
+│   ├── restclient/restclient.go  # Adapter REST client (HTTP/1.1 ou h2c; codec-plugável)
+│   ├── grpcclient/grpcclient.go  # Adapter gRPC client (protobuf)
+│   └── grpcavroclient/grpcavroclient.go # Adapter gRPC client (codec Avro)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL das 3 tabelas; corre só no 1º boot
 │   └── 02-seed.sql               # Bulk seed via CTE recursiva (50k/150k/150k)
@@ -637,12 +670,16 @@ go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTi
 **Microserviço — REST ou gRPC** (dois terminais):
 
 ```bash
-# Terminal A: serviço de dados (dono do MySQL, REST :9090 + gRPC :9091)
-go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091
+# Terminal A: serviço de dados (dono do MySQL, REST/HTTP1 :9090, gRPC :9091, REST/h2c :9092)
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091 -rest-h2c-addr :9092
 
-# Terminal B: front escolhe o protocolo (qualquer engine)
-go run main.go -engine fiber -repo rest -repo-addr http://localhost:9090
-go run main.go -engine fiber -repo grpc -repo-addr localhost:9091
+# Terminal B: front escolhe o par (transporte, serialização) (qualquer engine)
+go run main.go -engine fiber -repo rest        -repo-addr http://localhost:9090   # HTTP/1.1 + JSON
+go run main.go -engine fiber -repo resth2      -repo-addr http://localhost:9092   # HTTP/2  + JSON
+go run main.go -engine fiber -repo resth2-pb   -repo-addr http://localhost:9092   # HTTP/2  + protobuf
+go run main.go -engine fiber -repo resth2-avro -repo-addr http://localhost:9092   # HTTP/2  + Avro
+go run main.go -engine fiber -repo grpc        -repo-addr localhost:9091          # gRPC    + protobuf
+go run main.go -engine fiber -repo grpc-avro   -repo-addr localhost:9091          # gRPC    + Avro
 ```
 
 Regenerar os stubs proto **só quando o [proto/transactions.proto](proto/transactions.proto)
@@ -695,12 +732,16 @@ Dois scripts respondem a perguntas diferentes:
   Mantém `-repo mysql` (in-process). Varia engine × modo (5 × 2 = 10
   cells). ~5 min. Bom para iteração rápida.
 - **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 em conjunto*: como é
-  que cada framework se comporta sob cada backend? Matriz cheia
-  engine × backend × modo (5 × 3 × 2 = 30 cells). ~17 min. Output
-  agrupado por engine — 5 sub-tabelas de 6 linhas cada, para ler
-  directamente "engine X: mysql vs rest vs grpc". Escreve para
-  `bench-results-full/`. Auto-arranca o `cmd/dataservice` e
-  derruba-o no EXIT.
+  que cada framework se comporta sob cada (transporte, serialização)?
+  Matriz cheia engine × backend × modo (5 × 7 × 2 = 70 cells). ~40 min.
+  Os 7 backends são `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/
+  `resth2-avro` (h2c + json/pb/avro), `grpc` (pb) e `grpc-avro`. Output
+  agrupado por engine — 5 sub-tabelas de 14 linhas cada, para ler
+  directamente HTTP/1.1 vs HTTP/2 (`rest` vs `resth2`), HTTP/2 vs gRPC
+  (`resth2-pb` vs `grpc`) e protobuf vs Avro (`resth2-pb` vs `resth2-avro`;
+  `grpc` vs `grpc-avro`). Escreve para `bench-results-full/`. Auto-arranca
+  o `cmd/dataservice` (as três portas) e derruba-o no EXIT. Corte o array
+  `BACKENDS` se 70 cells for demasiado.
 
 ```bash
 chmod +x bench.sh bench-full.sh
@@ -823,87 +864,78 @@ Leituras:
   sqlx + MySQL adiciona ~310–390 µs de p50 constantes — DB+driver
   representam ~90% da latência hoje, framework ≤10%.
 
-#### Matriz cheia — engine × backend × modo
+#### Matriz cheia — transporte × serialização
 
-macOS arm64, 5000 req/s × 30s, três backends × dois modos por engine
-(30 cells, ~17 min). Linhas do Fiber a negrito — lidera o p50 em todos
-os backends.
+macOS arm64, 5000 req/s × 30s, 7 backends × 2 modos por engine (70 cells,
+~40 min). Todas as cells sustentaram 5000 req/s a 100% de sucesso — ninguém
+saturou, logo a história é a latência. **p50, modo `single`** abaixo (dados
+completos por cell — p95/p99 e `cycled` — em `bench-results-full/summary.txt`):
 
-| Engine  | Backend | Mode    | Throughput | p50         | p95         | p99           | Success |
-|---------|---------|---------|------------|-------------|-------------|---------------|---------|
-| stdlib  | mysql   | single  | 5000.0/s   | 423.6µs     | 517.2µs     | 687.8µs       | 100.00% |
-| stdlib  | mysql   | cycled  | 5000.0/s   | 407.6µs     | 508.2µs     | 701.6µs       | 100.00% |
-| stdlib  | rest    | single  | 5000.0/s   | 517.0µs     | 659.2µs     | 894.0µs       | 100.00% |
-| stdlib  | rest    | cycled  | 5000.0/s   | 517.1µs     | 676.7µs     | 978.2µs       | 100.00% |
-| stdlib  | grpc    | single  | 5000.0/s   | 555.2µs     | 758.0µs     | **6.85ms** ⚠  | 100.00% |
-| stdlib  | grpc    | cycled  | 5000.0/s   | 557.9µs     | 720.5µs     | 901.1µs       | 100.00% |
-| gin     | mysql   | single  | 5000.0/s   | 397.3µs     | 499.8µs     | 753.5µs       | 100.00% |
-| gin     | mysql   | cycled  | 5000.0/s   | 403.1µs     | 494.0µs     | 676.3µs       | 100.00% |
-| gin     | rest    | single  | 5000.0/s   | 516.6µs     | 670.7µs     | 898.1µs       | 100.00% |
-| gin     | rest    | cycled  | 5000.0/s   | 520.1µs     | 679.7µs     | 885.4µs       | 100.00% |
-| gin     | grpc    | single  | 5000.0/s   | 555.3µs     | 714.9µs     | 897.9µs       | 100.00% |
-| gin     | grpc    | cycled  | 5000.0/s   | 558.1µs     | 721.6µs     | 898.7µs       | 100.00% |
-| fiber   | mysql   | single  | 5000.0/s   | **354.2µs** | **430.6µs** | **630.2µs**   | 100.00% |
-| fiber   | mysql   | cycled  | 5000.0/s   | **359.8µs** | **437.8µs** | **617.4µs**   | 100.00% |
-| fiber   | rest    | single  | 5000.0/s   | **509.3µs** | **637.9µs** | **878.6µs**   | 100.00% |
-| fiber   | rest    | cycled  | 5000.0/s   | **510.4µs** | **646.9µs** | **860.4µs**   | 100.00% |
-| fiber   | grpc    | single  | 5000.0/s   | **543.6µs** | **682.4µs** | **869.9µs**   | 100.00% |
-| fiber   | grpc    | cycled  | 5000.0/s   | **548.8µs** | **692.1µs** | **876.0µs**   | 100.00% |
-| echo    | mysql   | single  | 5000.0/s   | 397.6µs     | 481.5µs     | 670.5µs       | 100.00% |
-| echo    | mysql   | cycled  | 5000.0/s   | 407.7µs     | 546.2µs     | 1.21ms        | 100.00% |
-| echo    | rest    | single  | 5000.0/s   | 523.0µs     | 869.9µs     | **9.80ms** ⚠  | 100.00% |
-| echo    | rest    | cycled  | 5000.0/s   | 516.6µs     | 662.6µs     | 887.0µs       | 100.00% |
-| echo    | grpc    | single  | 5000.0/s   | 555.1µs     | 714.1µs     | 887.8µs       | 100.00% |
-| echo    | grpc    | cycled  | 5000.0/s   | 558.3µs     | 725.7µs     | 925.8µs       | 100.00% |
-| chi     | mysql   | single  | 5000.0/s   | 395.4µs     | 477.5µs     | 660.5µs       | 100.00% |
-| chi     | mysql   | cycled  | 5000.0/s   | 397.8µs     | 484.3µs     | 653.3µs       | 100.00% |
-| chi     | rest    | single  | 5000.0/s   | 515.0µs     | 656.9µs     | 869.4µs       | 100.00% |
-| chi     | rest    | cycled  | 5000.0/s   | 518.6µs     | 665.1µs     | 869.8µs       | 100.00% |
-| chi     | grpc    | single  | 5000.0/s   | 568.1µs     | 827.8µs     | 1.33ms        | 100.00% |
-| chi     | grpc    | cycled  | 5000.0/s   | 563.4µs     | 1.52ms      | **21.94ms** ⚠ | 100.00% |
+| Engine | mysql | rest (h1/json) | resth2 (h2/json) | resth2-pb (h2/pb) | resth2-avro (h2/avro) | grpc (pb) | grpc-avro |
+|--------|------:|------:|------:|------:|------:|------:|------:|
+| stdlib | 431µs | 525µs | 543µs | 538µs | 542µs | 558µs | 558µs |
+| gin    | 398µs | 520µs | 544µs | 543µs | 543µs | 562µs | 560µs |
+| fiber  | **359µs** | **513µs** | **535µs** | **530µs** | **533µs** | **548µs** | **546µs** |
+| echo   | 397µs | 521µs | 544µs | 543µs | 537µs | 559µs | 556µs |
+| chi    | 400µs | 523µs | 543µs | 541µs | 540µs | 560µs | 558µs |
 
-Custo por backend (p50 médio das 10 cells de cada backend):
+Custo por backend (p50 médio das 10 cells de cada backend, single+cycled):
 
-| Backend | p50 médio | Overhead vs mysql |
-|---------|-----------|-------------------|
-| mysql   | 394 µs    | —                 |
-| rest    | 516 µs    | **+122 µs (+31%)** |
-| grpc    | 556 µs    | **+162 µs (+41%)** |
+| Backend       | transporte   | serialização | p50 médio | Overhead vs mysql |
+|---------------|--------------|--------------|-----------|-------------------|
+| mysql         | in-process   | —            | 399 µs    | —                 |
+| rest          | HTTP/1.1     | JSON         | 522 µs    | +123 µs (+31%)    |
+| resth2-avro   | HTTP/2 (h2c) | Avro         | 542 µs    | +143 µs (+36%)    |
+| resth2-pb     | HTTP/2 (h2c) | protobuf     | 544 µs    | +145 µs (+36%)    |
+| resth2        | HTTP/2 (h2c) | JSON         | 547 µs    | +148 µs (+37%)    |
+| grpc-avro     | gRPC         | Avro         | 557 µs    | +158 µs (+40%)    |
+| grpc          | gRPC         | protobuf     | 559 µs    | +160 µs (+40%)    |
 
-Leituras:
+Leituras — cada eixo isolado fixando o outro:
 
-- **REST é mais rápido que gRPC neste cenário.** Contraintuitivo mas
-  real para este payload (~250 B). O gRPC paga framing HTTP/2 +
-  marshal/unmarshal protobuf nas duas pontas; para agregados pequenos a
-  poupança no wire não compensa o setup por chamada. O gRPC começa a
-  ganhar em streaming, payloads grandes ou tipagem forte cross-language
-  — nada disso é exercitado neste benchmark.
-- **O Fiber ganha em todos os backends**, mas a vantagem encolhe à
-  medida que o I/O cresce: ~40 µs à frente em mysql, ~7 µs em rest,
-  ~10 µs em grpc. Quando a rede domina, a escolha de framework importa
-  menos — em `grpc`, os cinco engines cabem numa banda de 25 µs no p50.
-- **`single` vs `cycled` é praticamente idêntico nos 30 cells**, mesma
-  conclusão do bench.sh: os 150k IDs cabem nos 128 MB default do buffer
-  pool InnoDB, portanto estamos a medir index walk + planner de JOIN,
-  não disk I/O.
-- **Outliers de cauda** — três spikes de p99 a destacar:
-  stdlib/grpc/single (6.85 ms), echo/rest/single (9.80 ms) e
-  chi/grpc/cycled (21.94 ms). Os p95 correspondentes estão bem
-  comportados, logo são pausas pontuais (provavelmente GC), não
-  regressões sistémicas. Repetir esses três cells confirmaria.
+- **protobuf vs Avro é empate.** `resth2-pb` (544) ≈ `resth2-avro` (542) em
+  HTTP/2; `grpc` (559) ≈ `grpc-avro` (557) em gRPC. As diferenças (~2 µs)
+  estão dentro do ruído. Para um agregado de ~250 B o custo de serialização
+  é desprezível face ao JOIN + round-trip — **serialização não é o gargalo**,
+  logo a escolha binário-vs-binário não compra nada aqui.
+- **JSON também não perde para binário.** `resth2` (json, 547) ≈ `resth2-pb`
+  (544) ≈ `resth2-avro` (542). Mesma razão: encode/decode é erro de
+  arredondamento ao lado do hop ao DB. Trocar JSON por protobuf/Avro neste
+  tamanho de payload não vale a maquinaria de schema só por latência.
+- **gRPC é ~15 µs *mais lento* que HTTP/2 puro com o mesmo protobuf**
+  (`grpc` 559 vs `resth2-pb` 544, em todos os engines). O framing do gRPC
+  custa um pouco mais que h2c numa chamada unária simples; justifica-se com
+  streaming, multiplexing sob carga ou contratos cross-language — nada
+  exercitado aqui.
+- **HTTP/2 é ~25 µs *mais lento* que HTTP/1.1** em JSON (`resth2` 547 vs
+  `rest` 522). Numa única conexão loopback sequencial, o multiplexing do
+  HTTP/2 não traz benefício e o HPACK/framing acrescentam overhead. O HTTP/2
+  compensa com muitas streams concorrentes, que este padrão de ataque não tem.
+- **O eixo dominante é a framework, não o protocolo.** O Fiber (359 µs
+  in-process) lidera por ~40–70 µs — um espalhamento maior que qualquer
+  diferença de transporte/serialização nos backends de rede.
+- **`single` vs `cycled` é praticamente idêntico nos 70 cells** — os 150k
+  IDs cabem nos 128 MB default do buffer pool InnoDB, logo medimos index walk
+  + planner de JOIN, não disk I/O.
+- **Um outlier de cauda:** gin/resth2-pb/cycled p99 = 2.31 ms vs ~850 µs nos
+  restantes; o p95 está bem comportado, logo é uma pausa pontual
+  (provavelmente GC), não regressão.
 
 Conclusões práticas:
 
-- **In-process bate rede quando dá para escolher.** REST adiciona ~31%
-  no p50, gRPC ~41% — mesmo payload, mesmo DB, mesma stack tirando o
-  hop.
-- **Para microserviços com payloads JSON pequenos, REST é o default**;
-  o gRPC justifica-se com streaming, contratos cross-language, ou
-  quando a largura de banda do wire é o gargalo.
-- **A escolha de framework importa mais quando a framework é o
-  gargalo.** In-process a 5000 req/s, a vantagem de ~10% do Fiber é
-  real e vale a pena. Atrás de um hop de rede, os cinco engines
-  colapsam no mesmo tier — escolhe por ergonomia, não por µs.
+- **O hop de rede domina tudo o resto.** In-process (~399 µs) → qualquer
+  backend de rede (~520–560 µs) é um imposto plano de ~120–160 µs,
+  praticamente igual independentemente de protocolo ou formato de fio. Fica
+  in-process quando der.
+- **Em payloads pequenos, escolhe o protocolo por ergonomia, não latência.**
+  REST/JSON é o mais simples e o *mais rápido* na rede aqui; HTTP/2, gRPC e
+  serialização binária custam todos um pouco mais, não menos. protobuf/Avro/
+  gRPC justificam-se com payloads grandes, streaming ou tipagem cross-language
+  — repete com um agregado maior para o eixo de serialização separar de facto.
+- **A escolha de framework importa mais quando a framework é o gargalo.**
+  In-process, a vantagem de ~10% do Fiber é real. Atrás de um hop de rede os
+  cinco engines colapsam numa banda de ~15 µs — escolhe por ergonomia, não
+  por µs.
 
 #### Baseline anterior — `/health` estático (referência)
 

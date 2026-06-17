@@ -15,6 +15,7 @@ import (
 
 	"example.com/httpdi/app"
 	pb "example.com/httpdi/proto/transactionspb"
+	"example.com/httpdi/serde"
 )
 
 // TransactionClient wraps a gRPC connection and exposes app's
@@ -54,22 +55,5 @@ func (c *TransactionClient) GetByID(ctx context.Context, id string) (app.Transac
 		}
 		return app.Transaction{}, fmt.Errorf("grpc get %s: %w", id, err)
 	}
-	return fromProto(resp), nil
-}
-
-func fromProto(p *pb.Transaction) app.Transaction {
-	return app.Transaction{
-		ID:         p.GetId(),
-		Value:      p.GetValue(),
-		CreateDate: p.GetCreateDate().AsTime(),
-		Customer: app.Customer{
-			ID:         p.GetCustomer().GetId(),
-			Nome:       p.GetCustomer().GetNome(),
-			CreateDate: p.GetCustomer().GetCreateDate().AsTime(),
-		},
-		CartSnapshot: app.CartSnapshot{
-			ID:         p.GetCartSnapshot().GetId(),
-			CreateDate: p.GetCartSnapshot().GetCreateDate().AsTime(),
-		},
-	}
+	return serde.TransactionFromProto(resp), nil
 }

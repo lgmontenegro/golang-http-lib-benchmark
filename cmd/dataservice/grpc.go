@@ -6,10 +6,10 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"example.com/httpdi/app"
 	pb "example.com/httpdi/proto/transactionspb"
+	"example.com/httpdi/serde"
 )
 
 // transactionGRPCServer implements the generated TransactionServiceServer
@@ -33,22 +33,5 @@ func (s *transactionGRPCServer) GetById(ctx context.Context, req *pb.GetByIdRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get transaction: %v", err)
 	}
-	return transactionToProto(tx), nil
-}
-
-func transactionToProto(tx app.Transaction) *pb.Transaction {
-	return &pb.Transaction{
-		Id:         tx.ID,
-		Value:      tx.Value,
-		CreateDate: timestamppb.New(tx.CreateDate),
-		Customer: &pb.Customer{
-			Id:         tx.Customer.ID,
-			Nome:       tx.Customer.Nome,
-			CreateDate: timestamppb.New(tx.Customer.CreateDate),
-		},
-		CartSnapshot: &pb.CartSnapshot{
-			Id:         tx.CartSnapshot.ID,
-			CreateDate: timestamppb.New(tx.CartSnapshot.CreateDate),
-		},
-	}
+	return serde.TransactionToProto(tx), nil
 }
