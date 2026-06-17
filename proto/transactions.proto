@@ -1,0 +1,48 @@
+// Wire schema for the transactions service exposed by cmd/dataservice.
+//
+// Regenerate the Go stubs after editing this file:
+//   PATH="$(go env GOPATH)/bin:$PATH" \
+//   protoc --go_out=. --go_opt=paths=source_relative \
+//          --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+//          proto/transactions.proto
+//
+// The generated .pb.go files are committed to the repo so a plain
+// `go build` works without protoc; the tools are only needed when the
+// schema changes.
+
+syntax = "proto3";
+
+package httpdi.transactions.v1;
+
+option go_package = "example.com/httpdi/proto/transactionspb;transactionspb";
+
+import "google/protobuf/timestamp.proto";
+
+service TransactionService {
+  rpc GetById(GetByIdRequest) returns (Transaction);
+}
+
+message GetByIdRequest {
+  string id = 1;
+}
+
+// Transaction mirrors app.Transaction. Field numbers are stable forever
+// (proto3 wire compatibility).
+message Transaction {
+  string id = 1;
+  double value = 2;
+  google.protobuf.Timestamp create_date = 3;
+  Customer customer = 4;
+  CartSnapshot cart_snapshot = 5;
+}
+
+message Customer {
+  string id = 1;
+  string nome = 2;
+  google.protobuf.Timestamp create_date = 3;
+}
+
+message CartSnapshot {
+  string id = 1;
+  google.protobuf.Timestamp create_date = 2;
+}

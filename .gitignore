@@ -1,2 +1,4 @@
 bench-results/
+bench-results-full/
 mysql-data/
+.DS_Store

@@ -8,9 +8,35 @@
 
 A proof of concept demonstrating dependency inversion in Go to swap between
 five HTTP frameworks (stdlib, Gin, Fiber, Echo, chi) and compare their
-performance under steady load with vegeta. The benchmark target queries
-MySQL (joining three tables via sqlx) so the measurement covers the full
-path: framework + sqlx + driver + MySQL.
+performance under steady load with vegeta.
+
+The front service can resolve the transaction aggregate through several
+driven adapters selected by the `-repo` flag — each a **(transport,
+serialization)** pair so the benchmark isolates protocol from wire format:
+
+| `-repo`       | transport     | serialization | dataservice port |
+|---------------|---------------|---------------|------------------|
+| `mysql` *(def)* | in-process  | —             | —                |
+| `rest`        | HTTP/1.1      | JSON          | `:9090`          |
+| `resth2`      | HTTP/2 (h2c)  | JSON          | `:9092`          |
+| `resth2-pb`   | HTTP/2 (h2c)  | protobuf      | `:9092`          |
+| `resth2-avro` | HTTP/2 (h2c)  | Avro          | `:9092`          |
+| `grpc`        | gRPC          | protobuf      | `:9091`          |
+| `grpc-avro`   | gRPC          | Avro          | `:9091`          |
+
+This makes two questions answerable cleanly, each holding everything else
+fixed: **HTTP/1.1 vs HTTP/2** (`rest` vs `resth2`), **HTTP/2 vs gRPC** with
+serialization held to protobuf (`resth2-pb` vs `grpc`), and **protobuf vs
+Avro** on each transport (`resth2-pb` vs `resth2-avro`; `grpc` vs
+`grpc-avro`).
+
+The dataservice owns the MySQL connection and exposes all three transports
+from the same binary (REST/HTTP1 `:9090`, gRPC `:9091`, REST/h2c `:9092`),
+so the front picks the pair at startup. The REST endpoint content-negotiates
+JSON/protobuf/Avro via the `Accept` header; gRPC serves protobuf and Avro on
+the same listener via content-subtype. Same shape, same
+`app.TransactionRepository` interface — only the adapter differs. The
+benchmark covers the full path: framework + (sqlx or REST/gRPC hop) + MySQL.
 
 ### Table of contents
 
@@ -41,8 +67,22 @@ go install github.com/tsenart/vegeta@latest
 
 ```
 go-http-di/
-├── main.go                       # Composition root (wiring only)
-├── bench.sh                      # Comparative benchmark script
+├── main.go                       # Front service: composition root, -engine + -repo
+├── cmd/
+│   └── dataservice/              # Data service: owns MySQL, exposes REST/HTTP1 + REST/h2c + gRPC
+│       ├── main.go
+│       ├── handler.go            # REST handler (content-negotiated JSON/protobuf/Avro)
+│       ├── handler_test.go
+│       ├── grpc.go               # gRPC TransactionService impl (protobuf)
+│       └── grpc_avro.go          # gRPC TransactionServiceAvro impl (manual ServiceDesc)
+├── proto/
+│   ├── transactions.proto        # protobuf gRPC wire schema
+│   └── transactionspb/           # generated Go stubs (committed)
+├── serde/                        # Serialization codecs (JSON/protobuf/Avro); Avro schema lives here
+│   ├── serde.go                  # Codec port + ForAccept factory
+│   └── json.go / protobuf.go / avro.go
+├── bench.sh                      # Engine comparison (5 engines × 2 modes, mysql repo only)
+├── bench-full.sh                 # Full matrix (5 engines × 7 backends × 2 modes)
 ├── docker-compose.yml            # MySQL 8.0 with bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -55,7 +95,10 @@ go-http-di/
 │   ├── echoadapt/echo.go         # Echo adapter
 │   └── chiadapt/chi.go           # chi adapter
 ├── db/
-│   └── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
+│   ├── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
+│   ├── restclient/restclient.go  # REST client adapter (HTTP/1.1 or h2c; codec-pluggable)
+│   ├── grpcclient/grpcclient.go  # gRPC client adapter (protobuf)
+│   └── grpcavroclient/grpcavroclient.go # gRPC client adapter (Avro codec)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL for the 3 tables; runs only on first boot
 │   └── 02-seed.sql               # Bulk seed via recursive CTE (50k/150k/150k)
@@ -117,6 +160,8 @@ schema/seed: `docker compose down && rm -rf mysql-data && docker compose up
 
 ### Run the server manually
 
+**In-process MySQL** (default: front talks to MySQL directly):
+
 ```bash
 # stdlib (default), connects to MySQL on the default DSN
 go run main.go
@@ -131,7 +176,33 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-Smoke test:
+**Microservice topology — REST or gRPC** (two terminals):
+
+```bash
+# Terminal A: data tier (owns MySQL, REST/HTTP1 :9090, gRPC :9091, REST/h2c :9092)
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091 -rest-h2c-addr :9092
+
+# Terminal B: front picks the (transport, serialization) pair (any engine)
+go run main.go -engine fiber -repo rest        -repo-addr http://localhost:9090   # HTTP/1.1 + JSON
+go run main.go -engine fiber -repo resth2      -repo-addr http://localhost:9092   # HTTP/2  + JSON
+go run main.go -engine fiber -repo resth2-pb   -repo-addr http://localhost:9092   # HTTP/2  + protobuf
+go run main.go -engine fiber -repo resth2-avro -repo-addr http://localhost:9092   # HTTP/2  + Avro
+go run main.go -engine fiber -repo grpc        -repo-addr localhost:9091          # gRPC    + protobuf
+go run main.go -engine fiber -repo grpc-avro   -repo-addr localhost:9091          # gRPC    + Avro
+```
+
+Regenerate the proto stubs **only when [proto/transactions.proto](proto/transactions.proto)
+changes** (needs `protoc` + `protoc-gen-go` + `protoc-gen-go-grpc` — see
+the Notes at the bottom):
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" protoc \
+  --go_out=. --go_opt=module=example.com/httpdi \
+  --go-grpc_out=. --go-grpc_opt=module=example.com/httpdi \
+  proto/transactions.proto
+```
+
+Smoke test (same regardless of `-repo`):
 
 ```bash
 curl http://localhost:8080/health
@@ -165,18 +236,38 @@ Coverage:
 
 ### Run the benchmark
 
+Two scripts answer two different questions:
+
+- **[`bench.sh`](bench.sh)** — *Q1: which framework is fastest?* Holds
+  `-repo mysql` (in-process). Varies engine × mode (5 × 2 = 10 cells).
+  ~5 min. Use this for quick iteration.
+- **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 together*: how does
+  each framework behave under each (transport, serialization)? Full matrix
+  engine × backend × mode (5 × 7 × 2 = 70 cells). ~40 min. The 7 backends
+  are `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/`resth2-avro`
+  (h2c + json/pb/avro), `grpc` (pb) and `grpc-avro`. Output is grouped per
+  engine — 5 sub-tables of 14 rows each, so you can read HTTP/1.1 vs HTTP/2
+  (`rest` vs `resth2`), HTTP/2 vs gRPC (`resth2-pb` vs `grpc`) and protobuf
+  vs Avro (`resth2-pb` vs `resth2-avro`; `grpc` vs `grpc-avro`) directly.
+  Writes to `bench-results-full/`. Auto-starts `cmd/dataservice` (all three
+  ports) and tears it down on EXIT. Trim the `BACKENDS` array if 70 cells is
+  too long.
+
 ```bash
-chmod +x bench.sh
+chmod +x bench.sh bench-full.sh
 
-# Default: 5000 req/s for 30s per engine
+# Engine comparison (default: 5000 req/s for 30s per engine)
 ./bench.sh
+./bench.sh 10000 60s            # custom rate + duration
 
-# Custom: 10000 req/s for 60s
-./bench.sh 10000 60s
+# Full matrix (engine × backend × mode)
+./bench-full.sh
+./bench-full.sh 10000 60s
 ```
 
-The script runs **two attack modes per engine**, back-to-back (without
-restarting the server between them):
+Both scripts run **two attack modes** (per engine in bench.sh, per
+engine×backend in bench-full.sh), back-to-back without restarting the
+server between modes:
 
 - **`single`** — every request hits the same row (`…000000000001`). InnoDB
   pins it in the buffer pool → measures the hot path: framework + sqlx +
@@ -276,9 +367,80 @@ Reading:
   the other 9 cells. Last run had the same signature on Gin (`cycled`,
   4.58 ms) that **did not repeat** this run — so likely a GC pause or brief
   contention, not engine-specific. Worth one more pass to confirm.
-- **Compared to the baseline** (next section), JOIN + sqlx + MySQL adds
-  ~310–390 µs of constant p50 — DB+driver account for ~90% of today's
-  latency, framework ≤10%.
+- **Compared to the static `/health` baseline** (below), JOIN + sqlx +
+  MySQL adds ~310–390 µs of constant p50 — DB+driver account for ~90%
+  of today's latency, framework ≤10%.
+
+#### Full matrix — transport × serialization
+
+macOS arm64, 5000 req/s × 30s, 7 backends × 2 modes per engine (70 cells,
+~40 min). Every cell sustained 5000 req/s at 100% success — nobody saturated,
+so latency is the story. **p50, `single` mode** below (full per-cell data —
+p95/p99 and `cycled` — in `bench-results-full/summary.txt`):
+
+| Engine | mysql | rest (h1/json) | resth2 (h2/json) | resth2-pb (h2/pb) | resth2-avro (h2/avro) | grpc (pb) | grpc-avro |
+|--------|------:|------:|------:|------:|------:|------:|------:|
+| stdlib | 431µs | 525µs | 543µs | 538µs | 542µs | 558µs | 558µs |
+| gin    | 398µs | 520µs | 544µs | 543µs | 543µs | 562µs | 560µs |
+| fiber  | **359µs** | **513µs** | **535µs** | **530µs** | **533µs** | **548µs** | **546µs** |
+| echo   | 397µs | 521µs | 544µs | 543µs | 537µs | 559µs | 556µs |
+| chi    | 400µs | 523µs | 543µs | 541µs | 540µs | 560µs | 558µs |
+
+Backend cost (p50 averaged across the 10 cells per backend, single+cycled):
+
+| Backend       | transport    | serialization | avg p50 | Overhead vs mysql |
+|---------------|--------------|---------------|---------|-------------------|
+| mysql         | in-process   | —             | 399 µs  | —                 |
+| rest          | HTTP/1.1     | JSON          | 522 µs  | +123 µs (+31%)    |
+| resth2-avro   | HTTP/2 (h2c) | Avro          | 542 µs  | +143 µs (+36%)    |
+| resth2-pb     | HTTP/2 (h2c) | protobuf      | 544 µs  | +145 µs (+36%)    |
+| resth2        | HTTP/2 (h2c) | JSON          | 547 µs  | +148 µs (+37%)    |
+| grpc-avro     | gRPC         | Avro          | 557 µs  | +158 µs (+40%)    |
+| grpc          | gRPC         | protobuf      | 559 µs  | +160 µs (+40%)    |
+
+Readings — each axis isolated by holding the other fixed:
+
+- **protobuf vs Avro is a tie.** `resth2-pb` (544) ≈ `resth2-avro` (542) on
+  HTTP/2; `grpc` (559) ≈ `grpc-avro` (557) on gRPC. The gaps (~2 µs) are
+  inside the noise. For a ~250 B aggregate the serialization cost is
+  negligible against the JOIN + round-trip — **serialization is not the
+  bottleneck**, so the binary-vs-binary choice buys nothing here.
+- **JSON doesn't lose to binary either.** `resth2` (json, 547) ≈ `resth2-pb`
+  (544) ≈ `resth2-avro` (542). Same reason: encode/decode is rounding error
+  next to the DB hop. Swapping JSON for protobuf/Avro at this payload size is
+  not worth the schema machinery on latency grounds alone.
+- **gRPC is ~15 µs *slower* than plain HTTP/2 with the same protobuf**
+  (`grpc` 559 vs `resth2-pb` 544, every engine). gRPC's framing costs a bit
+  more than h2c for a simple unary call; it earns its keep with streaming,
+  multiplexing under load, or cross-language contracts — none exercised here.
+- **HTTP/2 is ~25 µs *slower* than HTTP/1.1** for JSON (`resth2` 547 vs
+  `rest` 522). On a single sequential loopback connection, HTTP/2's
+  multiplexing brings no benefit while HPACK/framing add overhead. HTTP/2
+  pays off with many concurrent streams, which this attack pattern lacks.
+- **The dominant axis is the framework, not the protocol.** Fiber (359 µs
+  in-process) leads the pack by ~40–70 µs — a wider spread than any
+  transport/serialization difference on the network backends.
+- **`single` vs `cycled` is essentially identical across all 70 cells** —
+  the 150k working set fits the default 128 MB InnoDB buffer pool, so we
+  measure index walk + JOIN planner, not disk I/O.
+- **One tail outlier:** gin/resth2-pb/cycled p99 = 2.31 ms vs ~850 µs
+  elsewhere; its p95 is well-behaved, so it's a transient pause (likely GC),
+  not a regression.
+
+Practical takeaway:
+
+- **The network hop dominates everything else.** In-process (~399 µs) →
+  any network backend (~520–560 µs) is a flat ~120–160 µs tax, roughly the
+  same regardless of protocol or wire format. Stay in-process when you can.
+- **At small payloads, pick the protocol for ergonomics, not latency.**
+  REST/JSON is the simplest and the *fastest* network option here; HTTP/2
+  and gRPC and binary serialization all cost a little more, not less.
+  protobuf/Avro/gRPC earn their keep with large payloads, streaming, or
+  cross-language type safety — re-run with a bigger aggregate to see the
+  serialization axis actually separate.
+- **Framework choice matters most when the framework is the bottleneck.**
+  In-process, fiber's ~10% edge is real. Behind a network hop the five
+  engines collapse into a ~15 µs band — pick by ergonomics, not by µs.
 
 #### Previous baseline — static `/health` (reference)
 
@@ -322,6 +484,15 @@ today's latency is DB + driver and ~10% framework.
   goroutine allocation) from polluting results.
 - For consistent results, close CPU/network-heavy apps and run several
   iterations.
+- Generated proto stubs (`proto/transactionspb/`) are committed, so plain
+  `go build` works without `protoc`. To regenerate (only after editing
+  `transactions.proto`):
+  ```bash
+  brew install protobuf
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+  ```
+  Then run the `protoc` command in the Microservice topology section.
 
 ---
 
@@ -329,9 +500,34 @@ today's latency is DB + driver and ~10% framework.
 
 Prova de conceito que demonstra inversão de dependência em Go para trocar
 entre cinco frameworks HTTP (stdlib, Gin, Fiber, Echo, chi) e comparar as
-suas performances sob carga constante com vegeta. O target do benchmark
-consulta MySQL (JOIN de três tabelas via sqlx), por isso a medição cobre o
-caminho completo: framework + sqlx + driver + MySQL.
+suas performances sob carga constante com vegeta.
+
+O serviço front pode resolver o agregado por vários adapters, selecionados
+pela flag `-repo` — cada um um par **(transporte, serialização)** para o
+benchmark isolar protocolo de formato de fio:
+
+| `-repo`       | transporte    | serialização | porta dataservice |
+|---------------|---------------|--------------|-------------------|
+| `mysql` *(def)* | in-process  | —            | —                 |
+| `rest`        | HTTP/1.1      | JSON         | `:9090`           |
+| `resth2`      | HTTP/2 (h2c)  | JSON         | `:9092`           |
+| `resth2-pb`   | HTTP/2 (h2c)  | protobuf     | `:9092`           |
+| `resth2-avro` | HTTP/2 (h2c)  | Avro         | `:9092`           |
+| `grpc`        | gRPC          | protobuf     | `:9091`           |
+| `grpc-avro`   | gRPC          | Avro         | `:9091`           |
+
+Isso torna duas perguntas respondíveis de forma limpa, cada uma fixando o
+resto: **HTTP/1.1 vs HTTP/2** (`rest` vs `resth2`), **HTTP/2 vs gRPC** com a
+serialização presa em protobuf (`resth2-pb` vs `grpc`) e **protobuf vs Avro**
+em cada transporte (`resth2-pb` vs `resth2-avro`; `grpc` vs `grpc-avro`).
+
+O dataservice é o dono da ligação ao MySQL e expõe os três transportes no
+mesmo binário (REST/HTTP1 `:9090`, gRPC `:9091`, REST/h2c `:9092`), portanto
+o front escolhe o par no arranque. O endpoint REST faz content-negotiation de
+JSON/protobuf/Avro pelo header `Accept`; o gRPC serve protobuf e Avro no mesmo
+listener via content-subtype. Mesma shape, mesma interface
+`app.TransactionRepository` — só muda o adapter. O benchmark cobre o caminho
+completo: framework + (sqlx ou hop REST/gRPC) + MySQL.
 
 ### Índice
 
@@ -362,8 +558,22 @@ go install github.com/tsenart/vegeta@latest
 
 ```
 go-http-di/
-├── main.go                       # Composition root (apenas wiring)
-├── bench.sh                      # Script de benchmark comparativo
+├── main.go                       # Serviço front: composition root, -engine + -repo
+├── cmd/
+│   └── dataservice/              # Serviço de dados: dono do MySQL, expõe REST/HTTP1 + REST/h2c + gRPC
+│       ├── main.go
+│       ├── handler.go            # Handler REST (content-negotiation JSON/protobuf/Avro)
+│       ├── handler_test.go
+│       ├── grpc.go               # TransactionService em gRPC (protobuf)
+│       └── grpc_avro.go          # TransactionServiceAvro em gRPC (ServiceDesc manual)
+├── proto/
+│   ├── transactions.proto        # Schema gRPC protobuf
+│   └── transactionspb/           # Stubs Go gerados (commitados)
+├── serde/                        # Codecs de serialização (JSON/protobuf/Avro); schema Avro vive aqui
+│   ├── serde.go                  # Porta Codec + fábrica ForAccept
+│   └── json.go / protobuf.go / avro.go
+├── bench.sh                      # Comparação de engines (5 × 2 modos, só -repo mysql)
+├── bench-full.sh                 # Matriz cheia (5 engines × 7 backends × 2 modos)
 ├── docker-compose.yml            # MySQL 8.0 com bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -376,7 +586,10 @@ go-http-di/
 │   ├── echoadapt/echo.go         # Adapter Echo
 │   └── chiadapt/chi.go           # Adapter chi
 ├── db/
-│   └── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
+│   ├── mysql/mysql.go            # Adapter MySQL (sqlx) para TransactionRepository
+│   ├── restclient/restclient.go  # Adapter REST client (HTTP/1.1 ou h2c; codec-plugável)
+│   ├── grpcclient/grpcclient.go  # Adapter gRPC client (protobuf)
+│   └── grpcavroclient/grpcavroclient.go # Adapter gRPC client (codec Avro)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL das 3 tabelas; corre só no 1º boot
 │   └── 02-seed.sql               # Bulk seed via CTE recursiva (50k/150k/150k)
@@ -438,6 +651,8 @@ compose up -d`.
 
 ### Executar o servidor manualmente
 
+**MySQL in-process** (default: front fala directamente com o MySQL):
+
 ```bash
 # stdlib (default), conecta a MySQL no DSN default
 go run main.go
@@ -452,7 +667,33 @@ go run main.go -engine chi
 go run main.go -engine gin -addr :3000 -dsn "user:pass@tcp(host:3306)/db?parseTime=true"
 ```
 
-Testar (smoke):
+**Microserviço — REST ou gRPC** (dois terminais):
+
+```bash
+# Terminal A: serviço de dados (dono do MySQL, REST/HTTP1 :9090, gRPC :9091, REST/h2c :9092)
+go run ./cmd/dataservice -rest-addr :9090 -grpc-addr :9091 -rest-h2c-addr :9092
+
+# Terminal B: front escolhe o par (transporte, serialização) (qualquer engine)
+go run main.go -engine fiber -repo rest        -repo-addr http://localhost:9090   # HTTP/1.1 + JSON
+go run main.go -engine fiber -repo resth2      -repo-addr http://localhost:9092   # HTTP/2  + JSON
+go run main.go -engine fiber -repo resth2-pb   -repo-addr http://localhost:9092   # HTTP/2  + protobuf
+go run main.go -engine fiber -repo resth2-avro -repo-addr http://localhost:9092   # HTTP/2  + Avro
+go run main.go -engine fiber -repo grpc        -repo-addr localhost:9091          # gRPC    + protobuf
+go run main.go -engine fiber -repo grpc-avro   -repo-addr localhost:9091          # gRPC    + Avro
+```
+
+Regenerar os stubs proto **só quando o [proto/transactions.proto](proto/transactions.proto)
+mudar** (precisa de `protoc` + `protoc-gen-go` + `protoc-gen-go-grpc` —
+ver Notas no fim):
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" protoc \
+  --go_out=. --go_opt=module=example.com/httpdi \
+  --go-grpc_out=. --go-grpc_opt=module=example.com/httpdi \
+  proto/transactions.proto
+```
+
+Testar (smoke, igual independentemente do `-repo`):
 
 ```bash
 curl http://localhost:8080/health
@@ -485,18 +726,37 @@ Cobertura:
 
 ### Executar o benchmark
 
+Dois scripts respondem a perguntas diferentes:
+
+- **[`bench.sh`](bench.sh)** — *Q1: qual framework é mais rápido?*
+  Mantém `-repo mysql` (in-process). Varia engine × modo (5 × 2 = 10
+  cells). ~5 min. Bom para iteração rápida.
+- **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 em conjunto*: como é
+  que cada framework se comporta sob cada (transporte, serialização)?
+  Matriz cheia engine × backend × modo (5 × 7 × 2 = 70 cells). ~40 min.
+  Os 7 backends são `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/
+  `resth2-avro` (h2c + json/pb/avro), `grpc` (pb) e `grpc-avro`. Output
+  agrupado por engine — 5 sub-tabelas de 14 linhas cada, para ler
+  directamente HTTP/1.1 vs HTTP/2 (`rest` vs `resth2`), HTTP/2 vs gRPC
+  (`resth2-pb` vs `grpc`) e protobuf vs Avro (`resth2-pb` vs `resth2-avro`;
+  `grpc` vs `grpc-avro`). Escreve para `bench-results-full/`. Auto-arranca
+  o `cmd/dataservice` (as três portas) e derruba-o no EXIT. Corte o array
+  `BACKENDS` se 70 cells for demasiado.
+
 ```bash
-chmod +x bench.sh
+chmod +x bench.sh bench-full.sh
 
-# Default: 5000 req/s durante 30s por engine
+# Comparação de engines (default: 5000 req/s durante 30s por engine)
 ./bench.sh
+./bench.sh 10000 60s            # rate + duração custom
 
-# Custom: 10000 req/s durante 60s
-./bench.sh 10000 60s
+# Matriz cheia (engine × backend × modo)
+./bench-full.sh
+./bench-full.sh 10000 60s
 ```
 
-O script corre **dois modos por engine**, back-to-back (sem reiniciar o
-servidor entre eles):
+Ambos correm **dois modos** (por engine no bench.sh, por engine×backend
+no bench-full.sh), back-to-back sem reiniciar o servidor entre modos:
 
 - **`single`** — todos os pedidos batem na mesma row
   (`…000000000001`). InnoDB mantém-a no buffer pool → mede o caminho
@@ -600,9 +860,82 @@ Leituras:
   (`cycled`, 4.58 ms) e **não se repetiu** desta vez — portanto é
   provavelmente uma pausa de GC ou contention pontual, não específico do
   engine. Vale uma nova execução para confirmar.
-- **Comparado à baseline** (próxima secção), JOIN + sqlx + MySQL adiciona
-  ~310–390 µs de p50 constantes — DB+driver representam ~90% da latência
-  hoje, framework ≤10%.
+- **Comparado à baseline estática do `/health`** (mais abaixo), JOIN +
+  sqlx + MySQL adiciona ~310–390 µs de p50 constantes — DB+driver
+  representam ~90% da latência hoje, framework ≤10%.
+
+#### Matriz cheia — transporte × serialização
+
+macOS arm64, 5000 req/s × 30s, 7 backends × 2 modos por engine (70 cells,
+~40 min). Todas as cells sustentaram 5000 req/s a 100% de sucesso — ninguém
+saturou, logo a história é a latência. **p50, modo `single`** abaixo (dados
+completos por cell — p95/p99 e `cycled` — em `bench-results-full/summary.txt`):
+
+| Engine | mysql | rest (h1/json) | resth2 (h2/json) | resth2-pb (h2/pb) | resth2-avro (h2/avro) | grpc (pb) | grpc-avro |
+|--------|------:|------:|------:|------:|------:|------:|------:|
+| stdlib | 431µs | 525µs | 543µs | 538µs | 542µs | 558µs | 558µs |
+| gin    | 398µs | 520µs | 544µs | 543µs | 543µs | 562µs | 560µs |
+| fiber  | **359µs** | **513µs** | **535µs** | **530µs** | **533µs** | **548µs** | **546µs** |
+| echo   | 397µs | 521µs | 544µs | 543µs | 537µs | 559µs | 556µs |
+| chi    | 400µs | 523µs | 543µs | 541µs | 540µs | 560µs | 558µs |
+
+Custo por backend (p50 médio das 10 cells de cada backend, single+cycled):
+
+| Backend       | transporte   | serialização | p50 médio | Overhead vs mysql |
+|---------------|--------------|--------------|-----------|-------------------|
+| mysql         | in-process   | —            | 399 µs    | —                 |
+| rest          | HTTP/1.1     | JSON         | 522 µs    | +123 µs (+31%)    |
+| resth2-avro   | HTTP/2 (h2c) | Avro         | 542 µs    | +143 µs (+36%)    |
+| resth2-pb     | HTTP/2 (h2c) | protobuf     | 544 µs    | +145 µs (+36%)    |
+| resth2        | HTTP/2 (h2c) | JSON         | 547 µs    | +148 µs (+37%)    |
+| grpc-avro     | gRPC         | Avro         | 557 µs    | +158 µs (+40%)    |
+| grpc          | gRPC         | protobuf     | 559 µs    | +160 µs (+40%)    |
+
+Leituras — cada eixo isolado fixando o outro:
+
+- **protobuf vs Avro é empate.** `resth2-pb` (544) ≈ `resth2-avro` (542) em
+  HTTP/2; `grpc` (559) ≈ `grpc-avro` (557) em gRPC. As diferenças (~2 µs)
+  estão dentro do ruído. Para um agregado de ~250 B o custo de serialização
+  é desprezível face ao JOIN + round-trip — **serialização não é o gargalo**,
+  logo a escolha binário-vs-binário não compra nada aqui.
+- **JSON também não perde para binário.** `resth2` (json, 547) ≈ `resth2-pb`
+  (544) ≈ `resth2-avro` (542). Mesma razão: encode/decode é erro de
+  arredondamento ao lado do hop ao DB. Trocar JSON por protobuf/Avro neste
+  tamanho de payload não vale a maquinaria de schema só por latência.
+- **gRPC é ~15 µs *mais lento* que HTTP/2 puro com o mesmo protobuf**
+  (`grpc` 559 vs `resth2-pb` 544, em todos os engines). O framing do gRPC
+  custa um pouco mais que h2c numa chamada unária simples; justifica-se com
+  streaming, multiplexing sob carga ou contratos cross-language — nada
+  exercitado aqui.
+- **HTTP/2 é ~25 µs *mais lento* que HTTP/1.1** em JSON (`resth2` 547 vs
+  `rest` 522). Numa única conexão loopback sequencial, o multiplexing do
+  HTTP/2 não traz benefício e o HPACK/framing acrescentam overhead. O HTTP/2
+  compensa com muitas streams concorrentes, que este padrão de ataque não tem.
+- **O eixo dominante é a framework, não o protocolo.** O Fiber (359 µs
+  in-process) lidera por ~40–70 µs — um espalhamento maior que qualquer
+  diferença de transporte/serialização nos backends de rede.
+- **`single` vs `cycled` é praticamente idêntico nos 70 cells** — os 150k
+  IDs cabem nos 128 MB default do buffer pool InnoDB, logo medimos index walk
+  + planner de JOIN, não disk I/O.
+- **Um outlier de cauda:** gin/resth2-pb/cycled p99 = 2.31 ms vs ~850 µs nos
+  restantes; o p95 está bem comportado, logo é uma pausa pontual
+  (provavelmente GC), não regressão.
+
+Conclusões práticas:
+
+- **O hop de rede domina tudo o resto.** In-process (~399 µs) → qualquer
+  backend de rede (~520–560 µs) é um imposto plano de ~120–160 µs,
+  praticamente igual independentemente de protocolo ou formato de fio. Fica
+  in-process quando der.
+- **Em payloads pequenos, escolhe o protocolo por ergonomia, não latência.**
+  REST/JSON é o mais simples e o *mais rápido* na rede aqui; HTTP/2, gRPC e
+  serialização binária custam todos um pouco mais, não menos. protobuf/Avro/
+  gRPC justificam-se com payloads grandes, streaming ou tipagem cross-language
+  — repete com um agregado maior para o eixo de serialização separar de facto.
+- **A escolha de framework importa mais quando a framework é o gargalo.**
+  In-process, a vantagem de ~10% do Fiber é real. Atrás de um hop de rede os
+  cinco engines colapsam numa banda de ~15 µs — escolhe por ergonomia, não
+  por µs.
 
 #### Baseline anterior — `/health` estático (referência)
 
@@ -648,3 +981,12 @@ framework.
   inicial de goroutines) polua os resultados.
 - Para resultados consistentes, fecha aplicações que consumam CPU/rede e corre
   várias iterações.
+- Os stubs proto gerados (`proto/transactionspb/`) estão commitados, portanto o
+  `go build` funciona sem `protoc`. Para regenerar (só depois de editar
+  `transactions.proto`):
+  ```bash
+  brew install protobuf
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+  ```
+  E depois corre o comando `protoc` na secção do microserviço.
