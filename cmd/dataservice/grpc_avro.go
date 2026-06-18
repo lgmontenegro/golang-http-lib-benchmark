@@ -22,6 +22,7 @@ var transactionAvroServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*app.TransactionRepository)(nil),
 	Methods: []grpc.MethodDesc{
 		{MethodName: "GetById", Handler: getByIDAvroHandler},
+		{MethodName: "GetBatch", Handler: getBatchAvroHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "serde/avro",
@@ -54,5 +55,29 @@ func getByIDAvroHandler(srv any, ctx context.Context, dec func(any) error, inter
 		return handler(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/httpdi.transactions.v1.TransactionServiceAvro/GetById"}
+	return interceptor(ctx, in, info, handler)
+}
+
+func getBatchAvroHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(serde.AvroGetBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	repo := srv.(app.TransactionRepository)
+	handler := func(ctx context.Context, req any) (any, error) {
+		txs, err := repo.GetBatch(ctx, int(req.(*serde.AvroGetBatchRequest).Limit))
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "get batch: %v", err)
+		}
+		dtos := make([]serde.AvroTransaction, len(txs))
+		for i, tx := range txs {
+			dtos[i] = serde.DomainToAvro(tx)
+		}
+		return &dtos, nil
+	}
+	if interceptor == nil {
+		return handler(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/httpdi.transactions.v1.TransactionServiceAvro/GetBatch"}
 	return interceptor(ctx, in, info, handler)
 }

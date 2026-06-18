@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,4 +95,33 @@ func (c *TransactionClient) GetByID(ctx context.Context, id string) (app.Transac
 	default:
 		return app.Transaction{}, fmt.Errorf("rest status %d", resp.StatusCode)
 	}
+}
+
+// GetBatch fetches up to limit aggregates from the dataservice list endpoint,
+// decoding the body with the configured codec.
+func (c *TransactionClient) GetBatch(ctx context.Context, limit int) ([]app.Transaction, error) {
+	u := c.base + "/v1/transactions/" + strconv.Itoa(limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rest build batch request: %w", err)
+	}
+	req.Header.Set("Accept", c.codec.ContentType())
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rest batch call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rest batch status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("rest batch read body: %w", err)
+	}
+	txs, err := c.codec.UnmarshalList(body)
+	if err != nil {
+		return nil, fmt.Errorf("rest batch decode: %w", err)
+	}
+	return txs, nil
 }

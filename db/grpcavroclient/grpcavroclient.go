@@ -18,9 +18,12 @@ import (
 	"example.com/httpdi/serde"
 )
 
-// avroGetByIDMethod is the full method name of the hand-written Avro service
-// registered by cmd/dataservice (see grpc_avro.go).
-const avroGetByIDMethod = "/httpdi.transactions.v1.TransactionServiceAvro/GetById"
+// Full method names of the hand-written Avro service registered by
+// cmd/dataservice (see grpc_avro.go).
+const (
+	avroGetByIDMethod = "/httpdi.transactions.v1.TransactionServiceAvro/GetById"
+	avroGetBatchMethod = "/httpdi.transactions.v1.TransactionServiceAvro/GetBatch"
+)
 
 // TransactionClient wraps a gRPC connection that exchanges Avro-encoded
 // messages with the dataservice.
@@ -58,4 +61,19 @@ func (c *TransactionClient) GetByID(ctx context.Context, id string) (app.Transac
 		return app.Transaction{}, fmt.Errorf("grpc-avro get %s: %w", id, err)
 	}
 	return serde.AvroToDomain(resp), nil
+}
+
+// GetBatch fetches up to limit aggregates over the Avro gRPC service.
+func (c *TransactionClient) GetBatch(ctx context.Context, limit int) ([]app.Transaction, error) {
+	req := &serde.AvroGetBatchRequest{Limit: int32(limit)}
+	var resp []serde.AvroTransaction
+	err := c.conn.Invoke(ctx, avroGetBatchMethod, req, &resp, grpc.CallContentSubtype(serde.AvroCodecName))
+	if err != nil {
+		return nil, fmt.Errorf("grpc-avro batch (limit=%d): %w", limit, err)
+	}
+	txs := make([]app.Transaction, len(resp))
+	for i, dto := range resp {
+		txs[i] = serde.AvroToDomain(dto)
+	}
+	return txs, nil
 }

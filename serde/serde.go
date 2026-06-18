@@ -18,16 +18,22 @@ const (
 	ContentAvro     = "application/avro"
 )
 
-// Codec marshals an app.Transaction to bytes and back for a single wire
-// format. Implementations are stateless and safe for concurrent use.
+// Codec marshals an app.Transaction (or a slice of them) to bytes and back
+// for a single wire format. Implementations are stateless and safe for
+// concurrent use.
 type Codec interface {
 	// ContentType is the MIME type carried in the REST Accept/Content-Type
 	// header so client and server agree on the format.
 	ContentType() string
-	// Marshal encodes the aggregate to its wire bytes.
+	// Marshal encodes a single aggregate to its wire bytes.
 	Marshal(tx app.Transaction) ([]byte, error)
-	// Unmarshal decodes wire bytes back into the aggregate.
+	// Unmarshal decodes wire bytes back into a single aggregate.
 	Unmarshal(data []byte) (app.Transaction, error)
+	// MarshalList encodes a batch of aggregates — used by the /v1/transactions
+	// list endpoint to drive the codecs under larger payloads.
+	MarshalList(txs []app.Transaction) ([]byte, error)
+	// UnmarshalList decodes a batch back into a slice.
+	UnmarshalList(data []byte) ([]app.Transaction, error)
 }
 
 // The three REST codecs. Stateless singletons — share them freely.

@@ -9,6 +9,7 @@
 //   resth2-avro — dataservice over HTTP/2 (h2c) + Avro.
 //   grpc        — dataservice over gRPC + protobuf.
 //   grpc-avro   — dataservice over gRPC + Avro.
+//   grpc-flat   — dataservice over gRPC + FlatBuffers (zero-copy).
 package main
 
 import (
@@ -24,6 +25,7 @@ import (
 	"example.com/httpdi/app"
 	"example.com/httpdi/db/grpcavroclient"
 	"example.com/httpdi/db/grpcclient"
+	"example.com/httpdi/db/grpcflatclient"
 	"example.com/httpdi/db/mysql"
 	"example.com/httpdi/db/restclient"
 	"example.com/httpdi/serde"
@@ -92,6 +94,12 @@ func newRepo(kind, dsn, repoAddr string) (app.TransactionRepository, func() erro
 			return nil, nil, fmt.Errorf("grpc-avro: %w", err)
 		}
 		return client, client.Close, nil
+	case "grpc-flat":
+		client, err := grpcflatclient.New(repoAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("grpc-flat: %w", err)
+		}
+		return client, client.Close, nil
 	default: // "mysql"
 		repo, err := mysql.New(dsn)
 		if err != nil {
@@ -104,7 +112,7 @@ func newRepo(kind, dsn, repoAddr string) (app.TransactionRepository, func() erro
 func run() error {
 	engine := flag.String("engine", "stdlib", "HTTP engine: stdlib | gin | fiber | echo | chi")
 	addr := flag.String("addr", ":8080", "listen address")
-	repoKind := flag.String("repo", "mysql", "TransactionRepository: mysql | rest | resth2 | resth2-pb | resth2-avro | grpc | grpc-avro")
+	repoKind := flag.String("repo", "mysql", "TransactionRepository: mysql | rest | resth2 | resth2-pb | resth2-avro | grpc | grpc-avro | grpc-flat")
 	dsn := flag.String("dsn", dsnFromEnv(), "MySQL DSN (used when -repo=mysql; also reads DB_DSN)")
 	repoAddr := flag.String("repo-addr", defaultRepoAddr, "dataservice address (URL for rest, host:port for grpc; e.g. localhost:9091)")
 	flag.Parse()
@@ -125,6 +133,7 @@ func run() error {
 	srv.RegisterRoute("GET", "/health", application.Health)
 	srv.RegisterRoute("GET", "/hello/:name", application.Hello)
 	srv.RegisterRoute("GET", "/v1/transaction/:transaction_id", application.GetTransaction)
+	srv.RegisterRoute("GET", "/v1/transactions/:count", application.GetTransactions)
 
 	errCh := make(chan error, 1)
 	go func() {

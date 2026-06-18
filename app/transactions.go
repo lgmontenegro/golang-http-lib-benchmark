@@ -35,6 +35,9 @@ type Transaction struct {
 // Adapter implementations live outside the app package.
 type TransactionRepository interface {
 	GetByID(ctx context.Context, id string) (Transaction, error)
+	// GetBatch returns up to limit aggregates. Used by the /v1/transactions
+	// list endpoint to drive the wire codecs under larger payloads.
+	GetBatch(ctx context.Context, limit int) ([]Transaction, error)
 }
 
 // ErrTransactionNotFound is returned by TransactionRepository implementations

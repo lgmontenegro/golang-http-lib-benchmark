@@ -97,6 +97,43 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id string) (app.Transacti
 	return row.toDomain(), nil
 }
 
+const getTransactionBatchQuery = `
+SELECT
+    t.id           AS transaction_id,
+    t.value        AS transaction_value,
+    t.create_date  AS transaction_create_date,
+    c.id           AS customer_id,
+    c.nome         AS customer_nome,
+    c.create_date  AS customer_create_date,
+    cs.id          AS cart_snapshot_id,
+    cs.create_date AS cart_snapshot_create_date
+FROM ` + "`transaction`" + ` t
+JOIN customer       c  ON c.id  = t.customer_id
+JOIN cart_snapshot  cs ON cs.transaction_id = t.id
+LIMIT ?
+`
+
+// GetBatch returns up to limit aggregates — the first N seeded transactions.
+// Same JOIN as GetByID; exists to drive the wire codecs under larger payloads.
+//
+// No ORDER BY on purpose: an explicit `ORDER BY t.id` makes MySQL materialise
+// the whole join into a temp table and filesort it on *every* request
+// (~135 ms here), which swamps the serialization signal the benchmark is after.
+// Without it the optimiser drives from cart_snapshot's transaction_id index and
+// stops at LIMIT, so rows still come back in ascending id order (the first N)
+// but in ~1 ms. An empty result is returned as an empty slice, not an error.
+func (r *TransactionRepo) GetBatch(ctx context.Context, limit int) ([]app.Transaction, error) {
+	var rows []transactionRow
+	if err := r.db.SelectContext(ctx, &rows, getTransactionBatchQuery, limit); err != nil {
+		return nil, fmt.Errorf("get transaction batch (limit=%d): %w", limit, err)
+	}
+	txs := make([]app.Transaction, len(rows))
+	for i, row := range rows {
+		txs[i] = row.toDomain()
+	}
+	return txs, nil
+}
+
 // Close releases the underlying connection pool.
 func (r *TransactionRepo) Close() error {
 	return r.db.Close()

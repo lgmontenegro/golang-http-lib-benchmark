@@ -35,3 +35,17 @@ func (s *transactionGRPCServer) GetById(ctx context.Context, req *pb.GetByIdRequ
 	}
 	return serde.TransactionToProto(tx), nil
 }
+
+// GetBatch fetches up to req.Limit aggregates and returns them as a
+// TransactionList — the protobuf large-payload path.
+func (s *transactionGRPCServer) GetBatch(ctx context.Context, req *pb.GetBatchRequest) (*pb.TransactionList, error) {
+	txs, err := s.repo.GetBatch(ctx, int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get batch: %v", err)
+	}
+	list := &pb.TransactionList{Transactions: make([]*pb.Transaction, len(txs))}
+	for i, tx := range txs {
+		list.Transactions[i] = serde.TransactionToProto(tx)
+	}
+	return list, nil
+}

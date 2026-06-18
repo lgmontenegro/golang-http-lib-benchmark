@@ -15,8 +15,13 @@ import (
 )
 
 type fakeTxRepo struct {
-	tx  app.Transaction
-	err error
+	tx    app.Transaction
+	batch []app.Transaction
+	err   error
+}
+
+func (f fakeTxRepo) GetBatch(_ context.Context, _ int) ([]app.Transaction, error) {
+	return f.batch, f.err
 }
 
 func (f fakeTxRepo) GetByID(_ context.Context, _ string) (app.Transaction, error) {
@@ -104,6 +109,47 @@ func TestGetTransactionHandlerContentNegotiation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetBatchHandlerContentNegotiation(t *testing.T) {
+	batch := []app.Transaction{
+		{ID: "a", Value: 1, CreateDate: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		{ID: "b", Value: 2, CreateDate: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/transactions/{count}", makeGetBatchHandler(fakeTxRepo{batch: batch}))
+
+	for _, codec := range []serde.Codec{serde.JSON, serde.Protobuf, serde.Avro} {
+		t.Run(codec.ContentType(), func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/transactions/2", nil)
+			req.Header.Set("Accept", codec.ContentType())
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if got := rec.Header().Get("Content-Type"); got != codec.ContentType() {
+				t.Errorf("Content-Type = %q, want %q", got, codec.ContentType())
+			}
+			got, err := codec.UnmarshalList(rec.Body.Bytes())
+			if err != nil {
+				t.Fatalf("decode %s: %v", codec.ContentType(), err)
+			}
+			if !reflect.DeepEqual(got, batch) {
+				t.Errorf("body = %+v\nwant = %+v", got, batch)
+			}
+		})
+	}
+
+	t.Run("bad count returns 400", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/transactions/abc", nil)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("status = %d, want 400", rec.Code)
+		}
+	})
 }
 
 func TestGetTransactionHandlerErrors(t *testing.T) {
