@@ -59,6 +59,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler)
 	mux.HandleFunc("GET /v1/transaction/{id}", makeGetTransactionHandler(repo))
+	mux.HandleFunc("GET /v1/transactions/{count}", makeGetBatchHandler(repo))
 	restSrv := &http.Server{Addr: *restAddr, Handler: mux}
 	h2cSrv := &http.Server{Addr: *restH2CAddr, Handler: h2c.NewHandler(mux, &http2.Server{})}
 
@@ -71,6 +72,7 @@ func run() error {
 	grpcSrv := grpc.NewServer()
 	pb.RegisterTransactionServiceServer(grpcSrv, newTransactionGRPCServer(repo))
 	registerTransactionAvroServer(grpcSrv, repo)
+	registerTransactionFlatServer(grpcSrv, repo)
 
 	errCh := make(chan error, 3)
 	go func() {

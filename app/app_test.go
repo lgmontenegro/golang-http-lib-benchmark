@@ -13,12 +13,17 @@ import (
 
 // fakeTxRepo is a controllable TransactionRepository for handler tests.
 type fakeTxRepo struct {
-	tx  Transaction
-	err error
+	tx    Transaction
+	batch []Transaction
+	err   error
 }
 
 func (f fakeTxRepo) GetByID(_ context.Context, _ string) (Transaction, error) {
 	return f.tx, f.err
+}
+
+func (f fakeTxRepo) GetBatch(_ context.Context, _ int) ([]Transaction, error) {
+	return f.batch, f.err
 }
 
 func TestHealth(t *testing.T) {
@@ -141,4 +146,50 @@ func TestGetTransactionErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetTransactions(t *testing.T) {
+	batch := []Transaction{
+		{ID: "a", Value: 1, CreateDate: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		{ID: "b", Value: 2, CreateDate: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+	}
+
+	t.Run("200 returns the batch as a JSON array", func(t *testing.T) {
+		a := New(fakeTxRepo{batch: batch})
+		resp := a.GetTransactions(context.Background(), server.Request{
+			Params: map[string]string{"count": "2"},
+		})
+		if resp.Status != 200 {
+			t.Fatalf("status = %d, want 200", resp.Status)
+		}
+		var got []Transaction
+		if err := json.Unmarshal(resp.Body, &got); err != nil {
+			t.Fatalf("unmarshal body %s: %v", resp.Body, err)
+		}
+		if !reflect.DeepEqual(got, batch) {
+			t.Errorf("body = %+v\nwant     = %+v", got, batch)
+		}
+	})
+
+	t.Run("bad count returns 400", func(t *testing.T) {
+		a := New(fakeTxRepo{batch: batch})
+		for _, count := range []string{"", "0", "-1", "abc", "999999"} {
+			resp := a.GetTransactions(context.Background(), server.Request{
+				Params: map[string]string{"count": count},
+			})
+			if resp.Status != 400 {
+				t.Errorf("count=%q: status = %d, want 400", count, resp.Status)
+			}
+		}
+	})
+
+	t.Run("repo error returns 500", func(t *testing.T) {
+		a := New(fakeTxRepo{err: errors.New("boom")})
+		resp := a.GetTransactions(context.Background(), server.Request{
+			Params: map[string]string{"count": "5"},
+		})
+		if resp.Status != 500 {
+			t.Errorf("status = %d, want 500", resp.Status)
+		}
+	})
 }

@@ -27,6 +27,26 @@ func (pbCodec) Unmarshal(data []byte) (app.Transaction, error) {
 	return TransactionFromProto(&msg), nil
 }
 
+func (pbCodec) MarshalList(txs []app.Transaction) ([]byte, error) {
+	list := &pb.TransactionList{Transactions: make([]*pb.Transaction, len(txs))}
+	for i, tx := range txs {
+		list.Transactions[i] = TransactionToProto(tx)
+	}
+	return proto.Marshal(list)
+}
+
+func (pbCodec) UnmarshalList(data []byte) ([]app.Transaction, error) {
+	var list pb.TransactionList
+	if err := proto.Unmarshal(data, &list); err != nil {
+		return nil, err
+	}
+	txs := make([]app.Transaction, len(list.Transactions))
+	for i, p := range list.Transactions {
+		txs[i] = TransactionFromProto(p)
+	}
+	return txs, nil
+}
+
 // TransactionToProto maps the domain aggregate onto its protobuf message.
 // Shared by pbCodec and the gRPC dataservice handler.
 func TransactionToProto(tx app.Transaction) *pb.Transaction {

@@ -20,12 +20,17 @@ import (
 // fakeServer is a controllable TransactionServiceServer for tests.
 type fakeServer struct {
 	pb.UnimplementedTransactionServiceServer
-	resp *pb.Transaction
-	err  error
+	resp  *pb.Transaction
+	batch *pb.TransactionList
+	err   error
 }
 
 func (f *fakeServer) GetById(_ context.Context, _ *pb.GetByIdRequest) (*pb.Transaction, error) {
 	return f.resp, f.err
+}
+
+func (f *fakeServer) GetBatch(_ context.Context, _ *pb.GetBatchRequest) (*pb.TransactionList, error) {
+	return f.batch, f.err
 }
 
 // startTestServer spins up a real grpc.Server on an ephemeral TCP port
@@ -121,6 +126,24 @@ func TestGetByID(t *testing.T) {
 		}
 		if errors.Is(err, app.ErrTransactionNotFound) {
 			t.Error("Internal must not be mapped to ErrTransactionNotFound")
+		}
+	})
+
+	t.Run("GetBatch returns the list", func(t *testing.T) {
+		list := &pb.TransactionList{Transactions: []*pb.Transaction{sampleProto, sampleProto}}
+		addr := startTestServer(t, &fakeServer{batch: list})
+		c, err := New(addr)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+
+		got, err := c.GetBatch(context.Background(), 2)
+		if err != nil {
+			t.Fatalf("GetBatch: %v", err)
+		}
+		if !reflect.DeepEqual(got, []app.Transaction{sample, sample}) {
+			t.Errorf("got %+v\nwant %+v", got, []app.Transaction{sample, sample})
 		}
 	})
 }

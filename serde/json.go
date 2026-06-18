@@ -23,3 +23,15 @@ func (jsonCodec) Unmarshal(data []byte) (app.Transaction, error) {
 	}
 	return tx, nil
 }
+
+func (jsonCodec) MarshalList(txs []app.Transaction) ([]byte, error) {
+	return json.Marshal(txs)
+}
+
+func (jsonCodec) UnmarshalList(data []byte) ([]app.Transaction, error) {
+	var txs []app.Transaction
+	if err := json.Unmarshal(data, &txs); err != nil {
+		return nil, err
+	}
+	return txs, nil
+}

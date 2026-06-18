@@ -10,9 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 
 	"example.com/httpdi/server"
 )
+
+// maxBatch caps the list endpoint so a bad ":count" can't ask for the whole
+// table. Comfortably above the largest benchmark size (5000).
+const maxBatch = 10000
 
 // App is the application core. Driven ports are injected as interface
 // fields so the core never depends on concrete adapters.
@@ -54,6 +59,28 @@ func (a *App) GetTransaction(ctx context.Context, req server.Request) server.Res
 	body, err := json.Marshal(tx)
 	if err != nil {
 		log.Printf("app: marshal transaction %s: %v", id, err)
+		return jsonResponse(500, []byte(`{"error":"internal"}`))
+	}
+	return jsonResponse(200, body)
+}
+
+// GetTransactions reads :count from the request, fetches that many aggregates
+// via the repository, and returns them as a JSON array. Bad count → 400,
+// repo error → 500. The external response is always JSON; the wire format
+// under test is the front→dataservice hop chosen by -repo.
+func (a *App) GetTransactions(ctx context.Context, req server.Request) server.Response {
+	count, err := strconv.Atoi(req.Params["count"])
+	if err != nil || count < 1 || count > maxBatch {
+		return jsonResponse(400, []byte(`{"error":"invalid count"}`))
+	}
+	txs, err := a.transactions.GetBatch(ctx, count)
+	if err != nil {
+		log.Printf("app: get transactions (count=%d): %v", count, err)
+		return jsonResponse(500, []byte(`{"error":"internal"}`))
+	}
+	body, err := json.Marshal(txs)
+	if err != nil {
+		log.Printf("app: marshal transactions (count=%d): %v", count, err)
 		return jsonResponse(500, []byte(`{"error":"internal"}`))
 	}
 	return jsonResponse(200, body)

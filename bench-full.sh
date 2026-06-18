@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench-full.sh — full matrix benchmark: 5 engines × 7 backends × 2 modes
+# bench-full.sh — full matrix benchmark: 5 engines × 8 backends × 2 modes
 # Builds on bench.sh but adds the -repo dimension as a (transport,
 # serialization) matrix: mysql in-process; REST over HTTP/1.1 and HTTP/2
 # (h2c) with JSON/protobuf/Avro; gRPC with protobuf/Avro. Output goes to
@@ -11,7 +11,7 @@
 #   rate     — requisições por segundo (default: 5000)
 #   duration — duração de cada sessão (default: 30s)
 #
-# Tempo estimado: ~40 min (70 cells × 33s + setup).
+# Tempo estimado: ~46 min (80 cells × 33s + setup).
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ DATA_GRPC_ADDR=":9091"
 DATA_RESTH2_ADDR=":9092"
 RESULTS_DIR="bench-results-full"
 ENGINES=("stdlib" "gin" "fiber" "echo" "chi")
-BACKENDS=("mysql" "rest" "resth2" "resth2-pb" "resth2-avro" "grpc" "grpc-avro")
+BACKENDS=("mysql" "rest" "resth2" "resth2-pb" "resth2-avro" "grpc" "grpc-avro" "grpc-flat")
 MODES=("single" "cycled")
 BENCH_TX_ID="00000000-0000-0000-0000-000000000001"
 SINGLE_TARGET="GET http://localhost:${FRONT_ADDR#:}/v1/transaction/${BENCH_TX_ID}"
@@ -118,9 +118,9 @@ start_front() {
                 -repo grpc -repo-addr "localhost:${DATA_GRPC_ADDR#:}" \
                 >/dev/null 2>&1 &
             ;;
-        grpc-avro)
+        grpc-avro | grpc-flat)
             ./"$FRONT_BIN" -engine "$engine" -addr "$FRONT_ADDR" \
-                -repo grpc-avro -repo-addr "localhost:${DATA_GRPC_ADDR#:}" \
+                -repo "$backend" -repo-addr "localhost:${DATA_GRPC_ADDR#:}" \
                 >/dev/null 2>&1 &
             ;;
         *)
@@ -139,7 +139,12 @@ stop_front() {
         wait "$FRONT_PID" 2>/dev/null || true
         FRONT_PID=""
     fi
-    sleep 1
+    # Wait for the listen port to free before the next front binds — fiber's
+    # shutdown is async and a rebind race would abort the run under set -e.
+    local tries=50
+    while lsof -ti "tcp:${FRONT_ADDR#:}" >/dev/null 2>&1; do
+        tries=$((tries - 1)); [ "$tries" -le 0 ] && break; sleep 0.1
+    done
 }
 
 run_attack() {
@@ -204,7 +209,7 @@ echo "✓ dataservice ready (PID $DATASERVICE_PID)"
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════════════╗"
-echo "║  Full matrix: 5 engines × 7 backends × 2 modes = 70 cells                ║"
+echo "║  Full matrix: 5 engines × 8 backends × 2 modes = 80 cells                ║"
 echo "║  Rate: $RATE req/s | Duration: $DURATION                                       ║"
 echo "╚══════════════════════════════════════════════════════════════════════════╝"
 
@@ -276,7 +281,7 @@ cat > "$COMBINED_PLOT" <<'HTMLHEAD'
 </style>
 </head>
 <body>
-<h1>Benchmark — Full Matrix (5 engines × 7 backends × 2 modes)</h1>
+<h1>Benchmark — Full Matrix (5 engines × 8 backends × 2 modes)</h1>
 HTMLHEAD
 
 for engine in "${ENGINES[@]}"; do

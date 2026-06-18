@@ -1,0 +1,44 @@
+// FlatBuffers wire schema for the gRPC-Flat path (zero-copy contender).
+// Mirrors app.Transaction. Dates are unix-micros int64 (same convention as
+// the Avro timestamp-micros logical type) so all formats round-trip alike.
+//
+// Regenerate the Go code after editing (only needed when this file changes):
+//   flatc --go -o proto proto/transactions.fbs
+//
+// The generated proto/transactionsfb/ package is committed so `go build`
+// works without flatc.
+
+namespace transactionsfb;
+
+table Customer {
+  id:string;
+  nome:string;
+  create_date:long;
+}
+
+table CartSnapshot {
+  id:string;
+  create_date:long;
+}
+
+table Transaction {
+  id:string;
+  value:double;
+  create_date:long;
+  customer:Customer;
+  cart_snapshot:CartSnapshot;
+}
+
+table TransactionList {
+  transactions:[Transaction];
+}
+
+table GetByIdRequest {
+  id:string;
+}
+
+table GetBatchRequest {
+  limit:int;
+}
+
+root_type Transaction;

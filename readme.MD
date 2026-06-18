@@ -23,20 +23,26 @@ serialization)** pair so the benchmark isolates protocol from wire format:
 | `resth2-avro` | HTTP/2 (h2c)  | Avro          | `:9092`          |
 | `grpc`        | gRPC          | protobuf      | `:9091`          |
 | `grpc-avro`   | gRPC          | Avro          | `:9091`          |
+| `grpc-flat`   | gRPC          | FlatBuffers   | `:9091`          |
 
-This makes two questions answerable cleanly, each holding everything else
+This makes the comparisons answerable cleanly, each holding everything else
 fixed: **HTTP/1.1 vs HTTP/2** (`rest` vs `resth2`), **HTTP/2 vs gRPC** with
 serialization held to protobuf (`resth2-pb` vs `grpc`), and **protobuf vs
-Avro** on each transport (`resth2-pb` vs `resth2-avro`; `grpc` vs
-`grpc-avro`).
+Avro vs FlatBuffers** on gRPC (`grpc` vs `grpc-avro` vs `grpc-flat`).
+
+There are two endpoints behind every backend: the single aggregate
+`/v1/transaction/:id` (~311 B) and the list `/v1/transactions/:count`
+returning N aggregates — the latter exists to drive the wire codecs under
+larger payloads, since serialization is rounding error at 311 B and only
+separates as N grows.
 
 The dataservice owns the MySQL connection and exposes all three transports
 from the same binary (REST/HTTP1 `:9090`, gRPC `:9091`, REST/h2c `:9092`),
-so the front picks the pair at startup. The REST endpoint content-negotiates
-JSON/protobuf/Avro via the `Accept` header; gRPC serves protobuf and Avro on
-the same listener via content-subtype. Same shape, same
-`app.TransactionRepository` interface — only the adapter differs. The
-benchmark covers the full path: framework + (sqlx or REST/gRPC hop) + MySQL.
+so the front picks the pair at startup. The REST endpoints content-negotiate
+JSON/protobuf/Avro via the `Accept` header; gRPC serves protobuf, Avro, and
+FlatBuffers on the same listener via content-subtype. Same shape, same
+`app.TransactionRepository` interface (`GetByID` + `GetBatch`) — only the
+adapter differs.
 
 ### Table of contents
 
@@ -73,16 +79,21 @@ go-http-di/
 │       ├── main.go
 │       ├── handler.go            # REST handler (content-negotiated JSON/protobuf/Avro)
 │       ├── handler_test.go
-│       ├── grpc.go               # gRPC TransactionService impl (protobuf)
-│       └── grpc_avro.go          # gRPC TransactionServiceAvro impl (manual ServiceDesc)
+│       ├── grpc.go               # gRPC TransactionService impl (protobuf, GetById + GetBatch)
+│       ├── grpc_avro.go          # gRPC TransactionServiceAvro impl (manual ServiceDesc)
+│       └── grpc_flat.go          # gRPC TransactionServiceFlat impl (FlatBuffers, manual ServiceDesc)
 ├── proto/
-│   ├── transactions.proto        # protobuf gRPC wire schema
-│   └── transactionspb/           # generated Go stubs (committed)
-├── serde/                        # Serialization codecs (JSON/protobuf/Avro); Avro schema lives here
-│   ├── serde.go                  # Codec port + ForAccept factory
-│   └── json.go / protobuf.go / avro.go
+│   ├── transactions.proto        # protobuf gRPC wire schema (GetById + GetBatch)
+│   ├── transactionspb/           # generated protobuf stubs (committed)
+│   ├── transactions.fbs          # FlatBuffers wire schema
+│   └── transactionsfb/           # generated FlatBuffers code (committed)
+├── serde/                        # Serialization codecs (JSON/protobuf/Avro/FlatBuffers)
+│   ├── serde.go                  # Codec port (single + list) + ForAccept factory
+│   ├── json.go / protobuf.go / avro.go
+│   └── flatbuffers.go            # FlatBuffers builders/readers + grpc codec (zero-copy)
 ├── bench.sh                      # Engine comparison (5 engines × 2 modes, mysql repo only)
-├── bench-full.sh                 # Full matrix (5 engines × 7 backends × 2 modes)
+├── bench-full.sh                 # Full matrix (5 engines × 8 backends × 2 modes, GetById)
+├── bench-payload.sh              # Payload matrix (fiber × 8 backends × 4 sizes, GetBatch)
 ├── docker-compose.yml            # MySQL 8.0 with bind mount
 ├── app/
 │   ├── app.go                    # Core: App struct + handlers
@@ -98,7 +109,8 @@ go-http-di/
 │   ├── mysql/mysql.go            # MySQL (sqlx) adapter for TransactionRepository
 │   ├── restclient/restclient.go  # REST client adapter (HTTP/1.1 or h2c; codec-pluggable)
 │   ├── grpcclient/grpcclient.go  # gRPC client adapter (protobuf)
-│   └── grpcavroclient/grpcavroclient.go # gRPC client adapter (Avro codec)
+│   ├── grpcavroclient/grpcavroclient.go # gRPC client adapter (Avro codec)
+│   └── grpcflatclient/grpcflatclient.go # gRPC client adapter (FlatBuffers codec)
 ├── mysql-init/
 │   ├── 01-schema.sql             # DDL for the 3 tables; runs only on first boot
 │   └── 02-seed.sql               # Bulk seed via recursive CTE (50k/150k/150k)
@@ -189,6 +201,7 @@ go run main.go -engine fiber -repo resth2-pb   -repo-addr http://localhost:9092 
 go run main.go -engine fiber -repo resth2-avro -repo-addr http://localhost:9092   # HTTP/2  + Avro
 go run main.go -engine fiber -repo grpc        -repo-addr localhost:9091          # gRPC    + protobuf
 go run main.go -engine fiber -repo grpc-avro   -repo-addr localhost:9091          # gRPC    + Avro
+go run main.go -engine fiber -repo grpc-flat   -repo-addr localhost:9091          # gRPC    + FlatBuffers
 ```
 
 Regenerate the proto stubs **only when [proto/transactions.proto](proto/transactions.proto)
@@ -236,22 +249,27 @@ Coverage:
 
 ### Run the benchmark
 
-Two scripts answer two different questions:
+Three scripts answer three questions:
 
 - **[`bench.sh`](bench.sh)** — *Q1: which framework is fastest?* Holds
   `-repo mysql` (in-process). Varies engine × mode (5 × 2 = 10 cells).
   ~5 min. Use this for quick iteration.
-- **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 together*: how does
-  each framework behave under each (transport, serialization)? Full matrix
-  engine × backend × mode (5 × 7 × 2 = 70 cells). ~40 min. The 7 backends
-  are `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/`resth2-avro`
-  (h2c + json/pb/avro), `grpc` (pb) and `grpc-avro`. Output is grouped per
-  engine — 5 sub-tables of 14 rows each, so you can read HTTP/1.1 vs HTTP/2
-  (`rest` vs `resth2`), HTTP/2 vs gRPC (`resth2-pb` vs `grpc`) and protobuf
-  vs Avro (`resth2-pb` vs `resth2-avro`; `grpc` vs `grpc-avro`) directly.
-  Writes to `bench-results-full/`. Auto-starts `cmd/dataservice` (all three
-  ports) and tears it down on EXIT. Trim the `BACKENDS` array if 70 cells is
-  too long.
+- **[`bench-full.sh`](bench-full.sh)** — *Q2: how does each framework
+  behave under each (transport, serialization)?* Full matrix engine ×
+  backend × mode on the single aggregate (5 × 8 × 2 = 80 cells). ~46 min.
+  The 8 backends are `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/
+  `resth2-avro` (h2c + json/pb/avro), `grpc` (pb), `grpc-avro`, `grpc-flat`.
+  Output grouped per engine — 5 sub-tables of 16 rows — so you can read
+  HTTP/1.1 vs HTTP/2 (`rest` vs `resth2`), HTTP/2 vs gRPC (`resth2-pb` vs
+  `grpc`) and protobuf vs Avro vs FlatBuffers (`grpc` vs `grpc-avro` vs
+  `grpc-flat`) directly. Writes to `bench-results-full/`. Trim the
+  `BACKENDS`/`ENGINES` arrays if 80 cells is too long.
+- **[`bench-payload.sh`](bench-payload.sh)** — *Q3: how do the wire formats
+  behave as the payload grows?* The list endpoint `/v1/transactions/:count`,
+  fiber only, backend × size: 8 backends × N{10,100,1000,5000} = 32 cells.
+  ~8 min (default 500 req/s × 10s — lower because payloads reach ~1.5 MB).
+  Writes to `bench-results-payload/`. This is where serialization is meant to
+  separate; at ~311 B (bench-full) it's noise.
 
 ```bash
 chmod +x bench.sh bench-full.sh
@@ -376,7 +394,11 @@ Reading:
 macOS arm64, 5000 req/s × 30s, 7 backends × 2 modes per engine (70 cells,
 ~40 min). Every cell sustained 5000 req/s at 100% success — nobody saturated,
 so latency is the story. **p50, `single` mode** below (full per-cell data —
-p95/p99 and `cycled` — in `bench-results-full/summary.txt`):
+p95/p99 and `cycled` — in `bench-results-full/summary.txt`).
+
+> The `grpc-flat` (FlatBuffers) backend was added after this run; at ~311 B it
+> tracks `grpc`/`grpc-avro` (serialization is noise at this size — see the
+> payload matrix below). Re-run `./bench-full.sh` to fill its column.
 
 | Engine | mysql | rest (h1/json) | resth2 (h2/json) | resth2-pb (h2/pb) | resth2-avro (h2/avro) | grpc (pb) | grpc-avro |
 |--------|------:|------:|------:|------:|------:|------:|------:|
@@ -441,6 +463,52 @@ Practical takeaway:
 - **Framework choice matters most when the framework is the bottleneck.**
   In-process, fiber's ~10% edge is real. Behind a network hop the five
   engines collapse into a ~15 µs band — pick by ergonomics, not by µs.
+
+#### Payload matrix — where serialization finally separates
+
+`bench-payload.sh`, macOS arm64, fiber only, 500 req/s × 10s, the list endpoint
+`/v1/transactions/:count`. p50 below; **N is the transaction count** (~311 B
+each, so N=1000 ≈ 300 KB, N=5000 ≈ 1.5 MB of JSON).
+
+| Backend                | N=10   | N=100  | N=1000 | N=5000 *(saturated)* |
+|------------------------|-------:|-------:|-------:|---------------------:|
+| mysql (in-process)     | 1.20ms | 1.49ms | 2.47ms | 3.36s / 100% ok      |
+| rest (h1 / JSON)       | 1.60ms | 2.19ms | 5.49ms | 4.19s / **60% ok**   |
+| resth2 (h2 / JSON)     | 1.64ms | 2.20ms | 5.92ms | 3.98s / **62% ok**   |
+| resth2-pb (h2 / pb)    | 1.55ms | 1.94ms | 3.73ms | 3.24s / **69% ok**   |
+| resth2-avro (h2 / avro)| 1.54ms | 1.89ms | 3.26ms | 3.15s / **70% ok**   |
+| grpc (pb)              | 1.53ms | 1.93ms | 3.32ms | 3.88s / 100% ok      |
+| grpc-avro              | 1.48ms | 1.86ms | 3.02ms | 3.44s / 100% ok      |
+| grpc-flat (FlatBuffers)| 1.49ms | 1.89ms | 3.04ms | 3.38s / 100% ok      |
+
+Readings:
+
+- **≤ N=100 (~30 KB): still a tie.** All formats sit within ~0.3 ms — the DB
+  hop dominates, serialization is noise. Same conclusion as the single
+  aggregate, just confirmed across a 100× payload range.
+- **N=1000 (~300 KB): the formats split.** JSON (`rest` 5.49 / `resth2` 5.92)
+  is **~60–95% slower** than the binary formats (`resth2-pb` 3.73, `resth2-avro`
+  3.26, `grpc-avro` 3.02, `grpc-flat` 3.04). This is the payback the small-payload
+  runs never showed — at scale, JSON's encode/parse + larger bytes cost real
+  milliseconds.
+- **Avro ≈ protobuf ≈ FlatBuffers** at every size. FlatBuffers' zero-copy does
+  **not** pull ahead here — because the front still decodes the upstream
+  response into `app.Transaction` and **re-encodes it as JSON for the client**,
+  so there's no zero-copy passthrough to exploit. The compact binary formats win
+  over JSON on the *hop*, but among themselves it's a wash for this access pattern.
+- **N=5000 (~1.5 MB): everyone saturates at 500 req/s** (even `mysql` sustains
+  only 271 req/s). The tell is **success rate**: the JSON REST backends start
+  **dropping requests (60–62%)**, the binary REST backends hold a bit better
+  (69–70%), and the gRPC backends keep 100% but pay it back as multi-second
+  queue latency (p99 12–16 s). JSON fails first under bandwidth pressure.
+- **HTTP/1.1 vs HTTP/2 for JSON stays a slight loss for h2** (`rest` ≤ `resth2`
+  at every size) — consistent with the single-aggregate matrix; multiplexing
+  brings nothing to this one-request-at-a-time pattern.
+
+Caveat worth stating: the front **always re-serializes to JSON for the vegeta
+client**, so the client-facing leg is identical across backends — the table
+isolates the front↔dataservice hop, not an end-to-end binary pipeline. A true
+zero-copy story would need FlatBuffers all the way to the client.
 
 #### Previous baseline — static `/health` (reference)
 
@@ -680,6 +748,7 @@ go run main.go -engine fiber -repo resth2-pb   -repo-addr http://localhost:9092 
 go run main.go -engine fiber -repo resth2-avro -repo-addr http://localhost:9092   # HTTP/2  + Avro
 go run main.go -engine fiber -repo grpc        -repo-addr localhost:9091          # gRPC    + protobuf
 go run main.go -engine fiber -repo grpc-avro   -repo-addr localhost:9091          # gRPC    + Avro
+go run main.go -engine fiber -repo grpc-flat   -repo-addr localhost:9091          # gRPC    + FlatBuffers
 ```
 
 Regenerar os stubs proto **só quando o [proto/transactions.proto](proto/transactions.proto)
@@ -726,22 +795,28 @@ Cobertura:
 
 ### Executar o benchmark
 
-Dois scripts respondem a perguntas diferentes:
+Três scripts respondem a três perguntas:
 
 - **[`bench.sh`](bench.sh)** — *Q1: qual framework é mais rápido?*
   Mantém `-repo mysql` (in-process). Varia engine × modo (5 × 2 = 10
   cells). ~5 min. Bom para iteração rápida.
-- **[`bench-full.sh`](bench-full.sh)** — *Q1 + Q2 em conjunto*: como é
-  que cada framework se comporta sob cada (transporte, serialização)?
-  Matriz cheia engine × backend × modo (5 × 7 × 2 = 70 cells). ~40 min.
-  Os 7 backends são `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/
-  `resth2-avro` (h2c + json/pb/avro), `grpc` (pb) e `grpc-avro`. Output
-  agrupado por engine — 5 sub-tabelas de 14 linhas cada, para ler
-  directamente HTTP/1.1 vs HTTP/2 (`rest` vs `resth2`), HTTP/2 vs gRPC
-  (`resth2-pb` vs `grpc`) e protobuf vs Avro (`resth2-pb` vs `resth2-avro`;
-  `grpc` vs `grpc-avro`). Escreve para `bench-results-full/`. Auto-arranca
-  o `cmd/dataservice` (as três portas) e derruba-o no EXIT. Corte o array
-  `BACKENDS` se 70 cells for demasiado.
+- **[`bench-full.sh`](bench-full.sh)** — *Q2: como é que cada framework se
+  comporta sob cada (transporte, serialização)?* Matriz cheia engine ×
+  backend × modo no agregado único (5 × 8 × 2 = 80 cells). ~46 min. Os 8
+  backends são `mysql`, `rest` (h1+json), `resth2`/`resth2-pb`/`resth2-avro`
+  (h2c + json/pb/avro), `grpc` (pb), `grpc-avro`, `grpc-flat`. Output
+  agrupado por engine — 5 sub-tabelas de 16 linhas — para ler directamente
+  HTTP/1.1 vs HTTP/2 (`rest` vs `resth2`), HTTP/2 vs gRPC (`resth2-pb` vs
+  `grpc`) e protobuf vs Avro vs FlatBuffers (`grpc` vs `grpc-avro` vs
+  `grpc-flat`). Escreve para `bench-results-full/`. Corte os arrays
+  `BACKENDS`/`ENGINES` se 80 cells for demasiado.
+- **[`bench-payload.sh`](bench-payload.sh)** — *Q3: como os formatos de fio
+  se comportam à medida que o payload cresce?* O endpoint de lista
+  `/v1/transactions/:count`, só fiber, backend × tamanho: 8 backends ×
+  N{10,100,1000,5000} = 32 cells. ~8 min (default 500 req/s × 10s — mais
+  baixo porque os payloads chegam a ~1.5 MB). Escreve para
+  `bench-results-payload/`. É aqui que a serialização deve separar; a ~311 B
+  (bench-full) é ruído.
 
 ```bash
 chmod +x bench.sh bench-full.sh
@@ -869,7 +944,12 @@ Leituras:
 macOS arm64, 5000 req/s × 30s, 7 backends × 2 modos por engine (70 cells,
 ~40 min). Todas as cells sustentaram 5000 req/s a 100% de sucesso — ninguém
 saturou, logo a história é a latência. **p50, modo `single`** abaixo (dados
-completos por cell — p95/p99 e `cycled` — em `bench-results-full/summary.txt`):
+completos por cell — p95/p99 e `cycled` — em `bench-results-full/summary.txt`).
+
+> O backend `grpc-flat` (FlatBuffers) foi adicionado depois desta corrida; a
+> ~311 B acompanha `grpc`/`grpc-avro` (serialização é ruído neste tamanho —
+> ver a matriz de payload abaixo). Re-execute `./bench-full.sh` para preencher
+> a coluna dele.
 
 | Engine | mysql | rest (h1/json) | resth2 (h2/json) | resth2-pb (h2/pb) | resth2-avro (h2/avro) | grpc (pb) | grpc-avro |
 |--------|------:|------:|------:|------:|------:|------:|------:|
@@ -936,6 +1016,51 @@ Conclusões práticas:
   In-process, a vantagem de ~10% do Fiber é real. Atrás de um hop de rede os
   cinco engines colapsam numa banda de ~15 µs — escolhe por ergonomia, não
   por µs.
+
+#### Matriz de payload — onde a serialização finalmente separa
+
+`bench-payload.sh`, macOS arm64, só fiber, 500 req/s × 10s, endpoint de lista
+`/v1/transactions/:count`. p50 abaixo; **N é a contagem de transações** (~311 B
+cada, logo N=1000 ≈ 300 KB, N=5000 ≈ 1.5 MB de JSON).
+
+| Backend                | N=10   | N=100  | N=1000 | N=5000 *(saturado)* |
+|------------------------|-------:|-------:|-------:|--------------------:|
+| mysql (in-process)     | 1.20ms | 1.49ms | 2.47ms | 3.36s / 100% ok     |
+| rest (h1 / JSON)       | 1.60ms | 2.19ms | 5.49ms | 4.19s / **60% ok**  |
+| resth2 (h2 / JSON)     | 1.64ms | 2.20ms | 5.92ms | 3.98s / **62% ok**  |
+| resth2-pb (h2 / pb)    | 1.55ms | 1.94ms | 3.73ms | 3.24s / **69% ok**  |
+| resth2-avro (h2 / avro)| 1.54ms | 1.89ms | 3.26ms | 3.15s / **70% ok**  |
+| grpc (pb)              | 1.53ms | 1.93ms | 3.32ms | 3.88s / 100% ok     |
+| grpc-avro              | 1.48ms | 1.86ms | 3.02ms | 3.44s / 100% ok     |
+| grpc-flat (FlatBuffers)| 1.49ms | 1.89ms | 3.04ms | 3.38s / 100% ok     |
+
+Leituras:
+
+- **≤ N=100 (~30 KB): ainda empate.** Todos dentro de ~0.3 ms — o hop ao DB
+  domina, serialização é ruído. Mesma conclusão do agregado único, agora
+  confirmada numa faixa de payload 100× maior.
+- **N=1000 (~300 KB): os formatos separam.** JSON (`rest` 5.49 / `resth2` 5.92)
+  é **~60–95% mais lento** que os binários (`resth2-pb` 3.73, `resth2-avro` 3.26,
+  `grpc-avro` 3.02, `grpc-flat` 3.04). É o retorno que os payloads pequenos nunca
+  mostraram — em escala, o encode/parse do JSON + bytes a mais custam ms reais.
+- **Avro ≈ protobuf ≈ FlatBuffers** em todos os tamanhos. O zero-copy do
+  FlatBuffers **não** dispara à frente aqui — porque o front ainda descodifica a
+  resposta do upstream para `app.Transaction` e **re-codifica em JSON para o
+  cliente**, logo não há passthrough zero-copy a explorar. Os binários ganham do
+  JSON no *hop*, mas entre si dá empate neste padrão de acesso.
+- **N=5000 (~1.5 MB): todos saturam a 500 req/s** (até o `mysql` só sustenta
+  271 req/s). O sinal é a **taxa de sucesso**: os backends REST/JSON começam a
+  **largar pedidos (60–62%)**, os REST binários aguentam um pouco melhor
+  (69–70%), e os gRPC mantêm 100% mas pagam em latência de fila multi-segundo
+  (p99 12–16 s). O JSON falha primeiro sob pressão de banda.
+- **HTTP/1.1 vs HTTP/2 para JSON continua ligeira perda do h2** (`rest` ≤
+  `resth2` em todos os tamanhos) — coerente com a matriz do agregado único; o
+  multiplexing não traz nada a este padrão um-pedido-de-cada-vez.
+
+Ressalva importante: o front **re-serializa sempre para JSON ao cliente vegeta**,
+logo a perna voltada ao cliente é idêntica entre backends — a tabela isola o hop
+front↔dataservice, não um pipeline binário ponta-a-ponta. Um cenário zero-copy
+real exigiria FlatBuffers até ao cliente.
 
 #### Baseline anterior — `/health` estático (referência)
 

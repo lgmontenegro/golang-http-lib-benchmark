@@ -7,6 +7,7 @@ require (
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gofiber/fiber/v2 v2.52.13
+	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/labstack/echo/v4 v4.15.2

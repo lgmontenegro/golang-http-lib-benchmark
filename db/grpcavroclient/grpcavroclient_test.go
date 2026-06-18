@@ -18,8 +18,9 @@ import (
 
 // fakeAvroServer is a controllable backend for the Avro gRPC service.
 type fakeAvroServer struct {
-	resp serde.AvroTransaction
-	err  error
+	resp  serde.AvroTransaction
+	batch []serde.AvroTransaction
+	err   error
 }
 
 // avroServiceDesc mirrors cmd/dataservice's hand-written Avro service so the
@@ -42,6 +43,21 @@ var avroServiceDesc = grpc.ServiceDesc{
 				}
 				resp := f.resp
 				return &resp, nil
+			},
+		},
+		{
+			MethodName: "GetBatch",
+			Handler: func(srv any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+				in := new(serde.AvroGetBatchRequest)
+				if err := dec(in); err != nil {
+					return nil, err
+				}
+				f := srv.(*fakeAvroServer)
+				if f.err != nil {
+					return nil, f.err
+				}
+				batch := f.batch
+				return &batch, nil
 			},
 		},
 	},
@@ -121,6 +137,24 @@ func TestGetByID(t *testing.T) {
 		}
 		if errors.Is(err, app.ErrTransactionNotFound) {
 			t.Error("Internal must not be mapped to ErrTransactionNotFound")
+		}
+	})
+
+	t.Run("GetBatch returns the list", func(t *testing.T) {
+		want := []app.Transaction{sample, sample}
+		addr := startTestServer(t, &fakeAvroServer{batch: []serde.AvroTransaction{serde.DomainToAvro(sample), serde.DomainToAvro(sample)}})
+		c, err := New(addr)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+
+		got, err := c.GetBatch(context.Background(), 2)
+		if err != nil {
+			t.Fatalf("GetBatch: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %+v\nwant %+v", got, want)
 		}
 	})
 }

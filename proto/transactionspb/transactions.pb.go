@@ -78,6 +78,96 @@ func (x *GetByIdRequest) GetId() string {
 	return ""
 }
 
+type GetBatchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBatchRequest) Reset() {
+	*x = GetBatchRequest{}
+	mi := &file_proto_transactions_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBatchRequest) ProtoMessage() {}
+
+func (x *GetBatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_transactions_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBatchRequest.ProtoReflect.Descriptor instead.
+func (*GetBatchRequest) Descriptor() ([]byte, []int) {
+	return file_proto_transactions_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GetBatchRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+// TransactionList is the batch response — N aggregates in one message, used
+// to exercise the serialization codecs under larger payloads.
+type TransactionList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Transactions  []*Transaction         `protobuf:"bytes,1,rep,name=transactions,proto3" json:"transactions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransactionList) Reset() {
+	*x = TransactionList{}
+	mi := &file_proto_transactions_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionList) ProtoMessage() {}
+
+func (x *TransactionList) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_transactions_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionList.ProtoReflect.Descriptor instead.
+func (*TransactionList) Descriptor() ([]byte, []int) {
+	return file_proto_transactions_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *TransactionList) GetTransactions() []*Transaction {
+	if x != nil {
+		return x.Transactions
+	}
+	return nil
+}
+
 // Transaction mirrors app.Transaction. Field numbers are stable forever
 // (proto3 wire compatibility).
 type Transaction struct {
@@ -93,7 +183,7 @@ type Transaction struct {
 
 func (x *Transaction) Reset() {
 	*x = Transaction{}
-	mi := &file_proto_transactions_proto_msgTypes[1]
+	mi := &file_proto_transactions_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -105,7 +195,7 @@ func (x *Transaction) String() string {
 func (*Transaction) ProtoMessage() {}
 
 func (x *Transaction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_transactions_proto_msgTypes[1]
+	mi := &file_proto_transactions_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -118,7 +208,7 @@ func (x *Transaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Transaction.ProtoReflect.Descriptor instead.
 func (*Transaction) Descriptor() ([]byte, []int) {
-	return file_proto_transactions_proto_rawDescGZIP(), []int{1}
+	return file_proto_transactions_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Transaction) GetId() string {
@@ -167,7 +257,7 @@ type Customer struct {
 
 func (x *Customer) Reset() {
 	*x = Customer{}
-	mi := &file_proto_transactions_proto_msgTypes[2]
+	mi := &file_proto_transactions_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -179,7 +269,7 @@ func (x *Customer) String() string {
 func (*Customer) ProtoMessage() {}
 
 func (x *Customer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_transactions_proto_msgTypes[2]
+	mi := &file_proto_transactions_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -192,7 +282,7 @@ func (x *Customer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Customer.ProtoReflect.Descriptor instead.
 func (*Customer) Descriptor() ([]byte, []int) {
-	return file_proto_transactions_proto_rawDescGZIP(), []int{2}
+	return file_proto_transactions_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Customer) GetId() string {
@@ -226,7 +316,7 @@ type CartSnapshot struct {
 
 func (x *CartSnapshot) Reset() {
 	*x = CartSnapshot{}
-	mi := &file_proto_transactions_proto_msgTypes[3]
+	mi := &file_proto_transactions_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -238,7 +328,7 @@ func (x *CartSnapshot) String() string {
 func (*CartSnapshot) ProtoMessage() {}
 
 func (x *CartSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_transactions_proto_msgTypes[3]
+	mi := &file_proto_transactions_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -251,7 +341,7 @@ func (x *CartSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CartSnapshot.ProtoReflect.Descriptor instead.
 func (*CartSnapshot) Descriptor() ([]byte, []int) {
-	return file_proto_transactions_proto_rawDescGZIP(), []int{3}
+	return file_proto_transactions_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CartSnapshot) GetId() string {
@@ -274,7 +364,11 @@ const file_proto_transactions_proto_rawDesc = "" +
 	"\n" +
 	"\x18proto/transactions.proto\x12\x16httpdi.transactions.v1\x1a\x1fgoogle/protobuf/timestamp.proto\" \n" +
 	"\x0eGetByIdRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"\xf9\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"'\n" +
+	"\x0fGetBatchRequest\x12\x14\n" +
+	"\x05limit\x18\x01 \x01(\x05R\x05limit\"Z\n" +
+	"\x0fTransactionList\x12G\n" +
+	"\ftransactions\x18\x01 \x03(\v2#.httpdi.transactions.v1.TransactionR\ftransactions\"\xf9\x01\n" +
 	"\vTransaction\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x01R\x05value\x12;\n" +
@@ -290,9 +384,10 @@ const file_proto_transactions_proto_rawDesc = "" +
 	"\fCartSnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12;\n" +
 	"\vcreate_date\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"createDate2l\n" +
+	"createDate2\xca\x01\n" +
 	"\x12TransactionService\x12V\n" +
-	"\aGetById\x12&.httpdi.transactions.v1.GetByIdRequest\x1a#.httpdi.transactions.v1.TransactionB8Z6example.com/httpdi/proto/transactionspb;transactionspbb\x06proto3"
+	"\aGetById\x12&.httpdi.transactions.v1.GetByIdRequest\x1a#.httpdi.transactions.v1.Transaction\x12\\\n" +
+	"\bGetBatch\x12'.httpdi.transactions.v1.GetBatchRequest\x1a'.httpdi.transactions.v1.TransactionListB8Z6example.com/httpdi/proto/transactionspb;transactionspbb\x06proto3"
 
 var (
 	file_proto_transactions_proto_rawDescOnce sync.Once
@@ -306,27 +401,32 @@ func file_proto_transactions_proto_rawDescGZIP() []byte {
 	return file_proto_transactions_proto_rawDescData
 }
 
-var file_proto_transactions_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_transactions_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_transactions_proto_goTypes = []any{
 	(*GetByIdRequest)(nil),        // 0: httpdi.transactions.v1.GetByIdRequest
-	(*Transaction)(nil),           // 1: httpdi.transactions.v1.Transaction
-	(*Customer)(nil),              // 2: httpdi.transactions.v1.Customer
-	(*CartSnapshot)(nil),          // 3: httpdi.transactions.v1.CartSnapshot
-	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
+	(*GetBatchRequest)(nil),       // 1: httpdi.transactions.v1.GetBatchRequest
+	(*TransactionList)(nil),       // 2: httpdi.transactions.v1.TransactionList
+	(*Transaction)(nil),           // 3: httpdi.transactions.v1.Transaction
+	(*Customer)(nil),              // 4: httpdi.transactions.v1.Customer
+	(*CartSnapshot)(nil),          // 5: httpdi.transactions.v1.CartSnapshot
+	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
 }
 var file_proto_transactions_proto_depIdxs = []int32{
-	4, // 0: httpdi.transactions.v1.Transaction.create_date:type_name -> google.protobuf.Timestamp
-	2, // 1: httpdi.transactions.v1.Transaction.customer:type_name -> httpdi.transactions.v1.Customer
-	3, // 2: httpdi.transactions.v1.Transaction.cart_snapshot:type_name -> httpdi.transactions.v1.CartSnapshot
-	4, // 3: httpdi.transactions.v1.Customer.create_date:type_name -> google.protobuf.Timestamp
-	4, // 4: httpdi.transactions.v1.CartSnapshot.create_date:type_name -> google.protobuf.Timestamp
-	0, // 5: httpdi.transactions.v1.TransactionService.GetById:input_type -> httpdi.transactions.v1.GetByIdRequest
-	1, // 6: httpdi.transactions.v1.TransactionService.GetById:output_type -> httpdi.transactions.v1.Transaction
-	6, // [6:7] is the sub-list for method output_type
-	5, // [5:6] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	3, // 0: httpdi.transactions.v1.TransactionList.transactions:type_name -> httpdi.transactions.v1.Transaction
+	6, // 1: httpdi.transactions.v1.Transaction.create_date:type_name -> google.protobuf.Timestamp
+	4, // 2: httpdi.transactions.v1.Transaction.customer:type_name -> httpdi.transactions.v1.Customer
+	5, // 3: httpdi.transactions.v1.Transaction.cart_snapshot:type_name -> httpdi.transactions.v1.CartSnapshot
+	6, // 4: httpdi.transactions.v1.Customer.create_date:type_name -> google.protobuf.Timestamp
+	6, // 5: httpdi.transactions.v1.CartSnapshot.create_date:type_name -> google.protobuf.Timestamp
+	0, // 6: httpdi.transactions.v1.TransactionService.GetById:input_type -> httpdi.transactions.v1.GetByIdRequest
+	1, // 7: httpdi.transactions.v1.TransactionService.GetBatch:input_type -> httpdi.transactions.v1.GetBatchRequest
+	3, // 8: httpdi.transactions.v1.TransactionService.GetById:output_type -> httpdi.transactions.v1.Transaction
+	2, // 9: httpdi.transactions.v1.TransactionService.GetBatch:output_type -> httpdi.transactions.v1.TransactionList
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_proto_transactions_proto_init() }
@@ -340,7 +440,7 @@ func file_proto_transactions_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_transactions_proto_rawDesc), len(file_proto_transactions_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

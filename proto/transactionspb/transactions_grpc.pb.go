@@ -31,7 +31,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TransactionService_GetById_FullMethodName = "/httpdi.transactions.v1.TransactionService/GetById"
+	TransactionService_GetById_FullMethodName  = "/httpdi.transactions.v1.TransactionService/GetById"
+	TransactionService_GetBatch_FullMethodName = "/httpdi.transactions.v1.TransactionService/GetBatch"
 )
 
 // TransactionServiceClient is the client API for TransactionService service.
@@ -39,6 +40,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type TransactionServiceClient interface {
 	GetById(ctx context.Context, in *GetByIdRequest, opts ...grpc.CallOption) (*Transaction, error)
+	GetBatch(ctx context.Context, in *GetBatchRequest, opts ...grpc.CallOption) (*TransactionList, error)
 }
 
 type transactionServiceClient struct {
@@ -59,11 +61,22 @@ func (c *transactionServiceClient) GetById(ctx context.Context, in *GetByIdReque
 	return out, nil
 }
 
+func (c *transactionServiceClient) GetBatch(ctx context.Context, in *GetBatchRequest, opts ...grpc.CallOption) (*TransactionList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransactionList)
+	err := c.cc.Invoke(ctx, TransactionService_GetBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TransactionServiceServer is the server API for TransactionService service.
 // All implementations must embed UnimplementedTransactionServiceServer
 // for forward compatibility.
 type TransactionServiceServer interface {
 	GetById(context.Context, *GetByIdRequest) (*Transaction, error)
+	GetBatch(context.Context, *GetBatchRequest) (*TransactionList, error)
 	mustEmbedUnimplementedTransactionServiceServer()
 }
 
@@ -76,6 +89,9 @@ type UnimplementedTransactionServiceServer struct{}
 
 func (UnimplementedTransactionServiceServer) GetById(context.Context, *GetByIdRequest) (*Transaction, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetById not implemented")
+}
+func (UnimplementedTransactionServiceServer) GetBatch(context.Context, *GetBatchRequest) (*TransactionList, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBatch not implemented")
 }
 func (UnimplementedTransactionServiceServer) mustEmbedUnimplementedTransactionServiceServer() {}
 func (UnimplementedTransactionServiceServer) testEmbeddedByValue()                            {}
@@ -116,6 +132,24 @@ func _TransactionService_GetById_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TransactionService_GetBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransactionServiceServer).GetBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransactionService_GetBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransactionServiceServer).GetBatch(ctx, req.(*GetBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TransactionService_ServiceDesc is the grpc.ServiceDesc for TransactionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -126,6 +160,10 @@ var TransactionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetById",
 			Handler:    _TransactionService_GetById_Handler,
+		},
+		{
+			MethodName: "GetBatch",
+			Handler:    _TransactionService_GetBatch_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

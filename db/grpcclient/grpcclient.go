@@ -57,3 +57,16 @@ func (c *TransactionClient) GetByID(ctx context.Context, id string) (app.Transac
 	}
 	return serde.TransactionFromProto(resp), nil
 }
+
+// GetBatch fetches up to limit aggregates as a protobuf TransactionList.
+func (c *TransactionClient) GetBatch(ctx context.Context, limit int) ([]app.Transaction, error) {
+	resp, err := c.client.GetBatch(ctx, &pb.GetBatchRequest{Limit: int32(limit)})
+	if err != nil {
+		return nil, fmt.Errorf("grpc batch (limit=%d): %w", limit, err)
+	}
+	txs := make([]app.Transaction, len(resp.GetTransactions()))
+	for i, p := range resp.GetTransactions() {
+		txs[i] = serde.TransactionFromProto(p)
+	}
+	return txs, nil
+}

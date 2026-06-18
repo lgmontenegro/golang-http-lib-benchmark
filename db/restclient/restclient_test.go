@@ -196,4 +196,33 @@ func TestGetByID_HTTP2(t *testing.T) {
 			t.Error("5xx must not be mapped to ErrTransactionNotFound")
 		}
 	})
+
+	t.Run("GetBatch round-trips a list over HTTP/2", func(t *testing.T) {
+		want := []app.Transaction{sample, sample, sample}
+		for name, codec := range codecs {
+			t.Run(name, func(t *testing.T) {
+				var gotPath string
+				h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					gotPath = r.URL.Path
+					body, _ := serde.ForAccept(r.Header.Get("Accept")).MarshalList(want)
+					w.Header().Set("Content-Type", r.Header.Get("Accept"))
+					_, _ = w.Write(body)
+				})
+				srv := httptest.NewServer(h2c.NewHandler(h, &http2.Server{}))
+				t.Cleanup(srv.Close)
+
+				c := NewHTTP2(srv.URL, codec)
+				got, err := c.GetBatch(context.Background(), 3)
+				if err != nil {
+					t.Fatalf("GetBatch: %v", err)
+				}
+				if gotPath != "/v1/transactions/3" {
+					t.Errorf("path = %q, want /v1/transactions/3", gotPath)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("got %+v\nwant %+v", got, want)
+				}
+			})
+		}
+	})
 }

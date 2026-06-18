@@ -46,6 +46,10 @@ var (
 		"namespace": "httpdi.transactions.v1",
 		"fields": [{"name": "id", "type": "string"}]
 	}`)
+
+	// avroListSchema is an Avro array of the Transaction record — the batch
+	// wire shape. Built from avroTxSchema so the record is defined once.
+	avroListSchema = avro.NewArraySchema(avroTxSchema)
 )
 
 // AvroTransaction is the Avro wire DTO mirroring app.Transaction. The avro:
@@ -73,6 +77,18 @@ type avroCartSnapshot struct {
 type AvroGetByIdRequest struct {
 	ID string `avro:"id"`
 }
+
+// AvroGetBatchRequest is the Avro wire DTO for the gRPC-Avro GetBatch request.
+type AvroGetBatchRequest struct {
+	Limit int32 `avro:"limit"`
+}
+
+var avroBatchReqSchema = avro.MustParse(`{
+	"type": "record",
+	"name": "GetBatchRequest",
+	"namespace": "httpdi.transactions.v1",
+	"fields": [{"name": "limit", "type": "int"}]
+}`)
 
 // DomainToAvro maps the domain aggregate onto its Avro DTO. Shared by the
 // REST Avro codec and the gRPC-Avro dataservice handler.
@@ -129,6 +145,26 @@ func (avroCodec) Unmarshal(data []byte) (app.Transaction, error) {
 	return AvroToDomain(dto), nil
 }
 
+func (avroCodec) MarshalList(txs []app.Transaction) ([]byte, error) {
+	dtos := make([]AvroTransaction, len(txs))
+	for i, tx := range txs {
+		dtos[i] = DomainToAvro(tx)
+	}
+	return avro.Marshal(avroListSchema, dtos)
+}
+
+func (avroCodec) UnmarshalList(data []byte) ([]app.Transaction, error) {
+	var dtos []AvroTransaction
+	if err := avro.Unmarshal(avroListSchema, data, &dtos); err != nil {
+		return nil, err
+	}
+	txs := make([]app.Transaction, len(dtos))
+	for i, dto := range dtos {
+		txs[i] = AvroToDomain(dto)
+	}
+	return txs, nil
+}
+
 // avroGRPCCodec implements grpc/encoding.Codec so the gRPC-Avro path carries
 // Avro DTOs over the wire instead of protobuf. It selects the schema by the
 // concrete message type — the gRPC-Avro service only ever exchanges these two.
@@ -142,8 +178,12 @@ func (avroGRPCCodec) Marshal(v any) ([]byte, error) {
 	switch m := v.(type) {
 	case *AvroTransaction:
 		return avro.Marshal(avroTxSchema, m)
+	case *[]AvroTransaction:
+		return avro.Marshal(avroListSchema, *m)
 	case *AvroGetByIdRequest:
 		return avro.Marshal(avroReqSchema, m)
+	case *AvroGetBatchRequest:
+		return avro.Marshal(avroBatchReqSchema, m)
 	default:
 		return nil, fmt.Errorf("serde: avro grpc codec cannot marshal %T", v)
 	}
@@ -153,8 +193,12 @@ func (avroGRPCCodec) Unmarshal(data []byte, v any) error {
 	switch m := v.(type) {
 	case *AvroTransaction:
 		return avro.Unmarshal(avroTxSchema, data, m)
+	case *[]AvroTransaction:
+		return avro.Unmarshal(avroListSchema, data, m)
 	case *AvroGetByIdRequest:
 		return avro.Unmarshal(avroReqSchema, data, m)
+	case *AvroGetBatchRequest:
+		return avro.Unmarshal(avroBatchReqSchema, data, m)
 	default:
 		return fmt.Errorf("serde: avro grpc codec cannot unmarshal %T", v)
 	}

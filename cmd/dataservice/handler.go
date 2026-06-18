@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 
 	"example.com/httpdi/app"
 	"example.com/httpdi/serde"
@@ -50,6 +51,40 @@ func makeGetTransactionHandler(repo app.TransactionRepository) http.HandlerFunc 
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write(body); err != nil {
 			log.Printf("dataservice: write response %s: %v", id, err)
+		}
+	}
+}
+
+// makeGetBatchHandler returns an http.HandlerFunc that fetches {count}
+// aggregates and writes them in the Accept-negotiated format (JSON, protobuf,
+// or Avro). This is the larger-payload counterpart of the single handler —
+// the same content negotiation, applied to a list. 200 on success, 400 on a
+// bad count, 500 otherwise. Error bodies stay JSON.
+func makeGetBatchHandler(repo app.TransactionRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		count, err := strconv.Atoi(r.PathValue("count"))
+		if err != nil || count < 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid count"})
+			return
+		}
+		txs, err := repo.GetBatch(r.Context(), count)
+		if err != nil {
+			log.Printf("dataservice: batch %d: %v", count, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
+			return
+		}
+
+		codec := serde.ForAccept(r.Header.Get("Accept"))
+		body, err := codec.MarshalList(txs)
+		if err != nil {
+			log.Printf("dataservice: marshal batch %d: %v", count, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal"})
+			return
+		}
+		w.Header().Set("Content-Type", codec.ContentType())
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(body); err != nil {
+			log.Printf("dataservice: write batch %d: %v", count, err)
 		}
 	}
 }

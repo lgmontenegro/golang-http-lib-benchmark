@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"example.com/httpdi/app"
+	fb "example.com/httpdi/proto/transactionsfb"
 )
 
 // sampleTx uses UTC, micro-aligned timestamps so the Avro timestamp-micros
@@ -50,6 +51,48 @@ func TestCodecRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodecListRoundTrip(t *testing.T) {
+	codecs := map[string]Codec{"json": JSON, "protobuf": Protobuf, "avro": Avro}
+	want := []app.Transaction{sampleTx(), sampleTx(), sampleTx()}
+
+	for name, codec := range codecs {
+		t.Run(name, func(t *testing.T) {
+			data, err := codec.MarshalList(want)
+			if err != nil {
+				t.Fatalf("MarshalList: %v", err)
+			}
+			got, err := codec.UnmarshalList(data)
+			if err != nil {
+				t.Fatalf("UnmarshalList: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("list round-trip mismatch:\n got %+v\nwant %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestFlatRoundTrip(t *testing.T) {
+	want := sampleTx()
+
+	t.Run("single", func(t *testing.T) {
+		b := MarshalFlatTransaction(want)
+		tbl := fb.GetRootAsTransaction(b.FinishedBytes(), 0)
+		if got := FlatToDomain(tbl); !reflect.DeepEqual(got, want) {
+			t.Errorf("got %+v\nwant %+v", got, want)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		wantList := []app.Transaction{want, want, want}
+		b := MarshalFlatList(wantList)
+		lst := fb.GetRootAsTransactionList(b.FinishedBytes(), 0)
+		if got := FlatListToDomain(lst); !reflect.DeepEqual(got, wantList) {
+			t.Errorf("got %+v\nwant %+v", got, wantList)
+		}
+	})
 }
 
 func TestForAccept(t *testing.T) {

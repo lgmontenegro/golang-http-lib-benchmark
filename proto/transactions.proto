@@ -20,10 +20,21 @@ import "google/protobuf/timestamp.proto";
 
 service TransactionService {
   rpc GetById(GetByIdRequest) returns (Transaction);
+  rpc GetBatch(GetBatchRequest) returns (TransactionList);
 }
 
 message GetByIdRequest {
   string id = 1;
+}
+
+message GetBatchRequest {
+  int32 limit = 1;
+}
+
+// TransactionList is the batch response — N aggregates in one message, used
+// to exercise the serialization codecs under larger payloads.
+message TransactionList {
+  repeated Transaction transactions = 1;
 }
 
 // Transaction mirrors app.Transaction. Field numbers are stable forever
